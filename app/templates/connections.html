@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block title %}Connections — LidValid{% endblock %}
+{% block content %}
+<div class="page-header"><h1>Connections</h1><span class="grow"></span><a class="btn pri" href="/connections/new">+ Tambah Koneksi</a></div>
+<div class="table-wrap">
+<table class="tbl">
+  <thead><tr><th>Nama</th><th>Engine</th><th>Host</th><th>Database</th><th>Status</th><th></th></tr></thead>
+  <tbody>
+  {% for c in connections %}
+    <tr>
+      <td>{{ c.name }}</td>
+      <td class="mono">{{ c.engine }}</td>
+      <td class="mono">{{ c.host }}:{{ c.port }}</td>
+      <td class="mono">{{ c.database }}</td>
+      <td>
+        {% if c.status == 'ok' %}<span class="pill pass">● OK</span>
+        {% elif c.status == 'failed' %}<span class="pill error">● Gagal</span>
+        {% else %}<span class="pill pending">○ Belum diuji</span>{% endif %}
+        {% if c.last_test_message %}<div class="subtle" style="margin-top:3px">{{ c.last_test_message }}</div>{% endif %}
+      </td>
+      <td class="row-actions">
+        <form method="post" action="/connections/{{ c.id }}/test"><button class="btn sm" type="submit">Test</button></form>
+        <a class="btn sm" href="/connections/{{ c.id }}/edit">Edit</a>
+        <form method="post" action="/connections/{{ c.id }}/delete" onsubmit="return confirm('Hapus koneksi {{ c.name }}?')">
+          <button class="btn sm danger" type="submit">Hapus</button>
+        </form>
+      </td>
+    </tr>
+  {% else %}
+    <tr><td colspan="6" class="subtle">Belum ada koneksi.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endblock %}

@@ -1,0 +1,26 @@
+<div class="table-wrap">
+<table class="tbl">
+  <thead><tr><th>Tabel</th><th>Status</th><th>Tier</th><th>Rows src/tgt</th><th>Δrow</th><th>Agg✖</th><th>Miss</th><th>Diff</th><th></th></tr></thead>
+  <tbody>
+  {% for rt in run_tables %}
+    <tr data-href="/runs/{{ rt.run_id }}/tables/{{ rt.id }}">
+      <td class="mono">{{ rt.source_table }} → {{ rt.target_table }}</td>
+      <td><span class="pill {{ rt.status }}">{{ rt.status.upper() }}</span></td>
+      <td>{{ rt.tier_reached or '—' }}</td>
+      <td class="mono">{{ rt.source_rows if rt.source_rows is not none else '—' }} / {{ rt.target_rows if rt.target_rows is not none else '—' }}</td>
+      <td class="mono">{{ rt.row_diff if rt.row_diff is not none else '—' }}</td>
+      <td class="mono">{{ rt.agg_metrics.stat_mismatch if rt.agg_metrics and rt.agg_metrics.stat_mismatch is not none else '—' }}</td>
+      <td class="mono">{{ (rt.rl_metrics.missing_in_source + rt.rl_metrics.missing_in_target) if rt.rl_metrics else '—' }}</td>
+      <td class="mono">{{ rt.rl_metrics.differing_values if rt.rl_metrics else '—' }}</td>
+      <td><a class="btn sm" href="/runs/{{ rt.run_id }}/tables/{{ rt.id }}">Detail ▸</a></td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+
+<div class="log-box" style="margin-top:14px" id="log-box">
+{% for e in events %}
+  <div class="line">[{{ e.kind }}] {{ e.message }}</div>
+{% endfor %}
+</div>

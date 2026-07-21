@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block title %}Buat Config — LidValid{% endblock %}
+{% block content %}
+<div class="page-header"><h1>Buat Validation Config</h1></div>
+<div class="card" style="max-width:560px">
+<form class="stack" method="post" action="/configs">
+  <div class="field">
+    <label>Nama</label>
+    <input name="name" required placeholder="mis. RAW: MySQL vs ClickHouse">
+  </div>
+  <div class="field">
+    <label>Deskripsi</label>
+    <textarea name="description" rows="2"></textarea>
+  </div>
+  <div class="field">
+    <label>Source Connection</label>
+    <select name="source_connection_id" required>
+      {% for c in connections %}<option value="{{ c.id }}">{{ c.name }} ({{ c.engine }})</option>{% endfor %}
+    </select>
+  </div>
+  <div class="field">
+    <label>Target Connection</label>
+    <select name="target_connection_id" required>
+      {% for c in connections %}<option value="{{ c.id }}">{{ c.name }} ({{ c.engine }})</option>{% endfor %}
+    </select>
+  </div>
+  <div class="field">
+    <label>Mode default</label>
+    <select name="default_mode">
+      <option value="tiered" selected>tiered (agregat, lalu row-level untuk yang FAIL)</option>
+      <option value="aggregate">aggregate saja</option>
+      <option value="rowlevel_missing">row-level — missing keys saja</option>
+      <option value="rowlevel_full">row-level — missing + value diff</option>
+    </select>
+  </div>
+  <div class="row-actions">
+    <button class="btn acc" type="submit">Simpan &amp; Lanjut ke Pemetaan Tabel</button>
+    <a class="btn" href="/configs">Batal</a>
+  </div>
+</form>
+</div>
+{% endblock %}

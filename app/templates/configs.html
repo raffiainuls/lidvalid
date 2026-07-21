@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block title %}Configs — LidValid{% endblock %}
+{% block content %}
+<div class="page-header"><h1>Validation Configs</h1><span class="grow"></span><a class="btn pri" href="/configs/new">+ Buat Config</a></div>
+<div class="table-wrap">
+<table class="tbl">
+  <thead><tr><th>Nama</th><th>Source → Target</th><th>Tabel</th><th>Mode default</th><th>Run terakhir</th><th></th></tr></thead>
+  <tbody>
+  {% for c in configs %}
+    <tr data-href="/configs/{{ c.id }}">
+      <td><a href="/configs/{{ c.id }}">{{ c.name }}</a></td>
+      <td class="mono">{{ c.source_connection.name }} → {{ c.target_connection.name }}</td>
+      <td>{{ c.tables|length }}</td>
+      <td class="mono">{{ c.default_mode }}</td>
+      <td>
+        {% set lr = last_runs.get(c.id) %}
+        {% if lr %}<a href="/runs/{{ lr.id }}"><span class="pill {{ lr.status }}">{{ lr.status.upper() }}</span> #{{ lr.id }}</a>{% else %}—{% endif %}
+      </td>
+      <td><a class="btn sm" href="/configs/{{ c.id }}">Buka</a></td>
+    </tr>
+  {% else %}
+    <tr><td colspan="6" class="subtle">Belum ada config.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endblock %}

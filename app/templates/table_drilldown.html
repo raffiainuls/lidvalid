@@ -1,0 +1,304 @@
+{% extends "base.html" %}
+{% block title %}{{ rt.source_table }} — Run #{{ run.id }} — LidValid{% endblock %}
+{% block content %}
+{% macro pager(tab_name, extra_qs='') %}
+{% if total_pages > 1 %}
+<div class="row-actions" style="margin-top:12px;align-items:center">
+  <span class="subtle">Halaman {{ page }} / {{ total_pages }} ({{ page_size }} baris/halaman)</span>
+  {% if page > 1 %}<a class="btn sm" href="?tab={{ tab_name }}{{ extra_qs }}&page={{ page - 1 }}">← Sebelumnya</a>{% endif %}
+  {% if page < total_pages %}<a class="btn sm" href="?tab={{ tab_name }}{{ extra_qs }}&page={{ page + 1 }}">Berikutnya →</a>{% endif %}
+</div>
+{% endif %}
+{% endmacro %}
+{% macro copy_panel() %}
+<div id="copy-modal-backdrop" class="modal-backdrop" onclick="if (event.target === this) closeCopyModal()">
+  <div class="modal-card">
+    <div class="modal-header">
+      <h3>📋 Key bermasalah</h3>
+      <button type="button" class="modal-close" onclick="closeCopyModal()" aria-label="Tutup">✕</button>
+    </div>
+    <p class="subtle" style="margin:0 0 10px">Siap tempel ke <span class="mono">WHERE ... IN (...)</span>.</p>
+    <textarea id="copy-textarea" class="copy-textarea" readonly rows="10"></textarea>
+    <div class="modal-footer">
+      <span id="copy-status" class="subtle"></span>
+      <span class="grow"></span>
+      <button type="button" class="btn" onclick="closeCopyModal()">Tutup</button>
+      <button type="button" class="btn acc" onclick="recopyKeys()">📋 Salin ke Clipboard</button>
+    </div>
+  </div>
+</div>
+{% endmacro %}
+{% set column_type_details = rt.column_type_details or [] %}
+{% set type_mismatch_count = column_type_details|selectattr('category_match', 'equalto', false)|list|length %}
+<div class="page-header">
+  <h1 class="mono">{{ rt.source_table }} → {{ rt.target_table }}</h1>
+  <span class="pill {{ rt.status }}">{{ rt.status.upper() }} · tier {{ rt.tier_reached }}</span>
+  <span class="grow"></span>
+  {% if rt.status in ('pass', 'fail', 'error', 'cancelled') %}
+  <form method="post" action="/configs/{{ run.config_id }}/rerun-table" style="display:inline">
+    <input type="hidden" name="source_table" value="{{ rt.source_table }}">
+    <button class="btn" type="submit">↻ Re-run tabel ini</button>
+  </form>
+  {% endif %}
+  <a class="btn" href="/configs/{{ run.config_id }}/status">📊 Status Tabel</a>
+  <a class="btn" href="/runs/{{ run.id }}">← kembali ke Run #{{ run.id }}</a>
+</div>
+<p class="subtle mono">
+  rows: {{ rt.source_rows if rt.source_rows is not none else '—' }} / {{ rt.target_rows if rt.target_rows is not none else '—' }}
+  {% if rt.rl_metrics %} · key: {{ rt.rl_metrics.key_columns }} · {{ rt.rl_metrics.value_columns|length }} kolom dibandingkan{% endif %}
+  {% if rt.error %} · error: {{ rt.error }}{% endif %}
+</p>
+
+<div class="tabs">
+  <a href="?tab=ringkasan" class="{{ 'active' if tab=='ringkasan' else '' }}">Ringkasan</a>
+  <a href="?tab=agregat" class="{{ 'active' if tab=='agregat' else '' }}">Temuan Agregat ({{ agg_findings|length }})</a>
+  <a href="?tab=tipekolom" class="{{ 'active' if tab=='tipekolom' else '' }}">Tipe Kolom{% if type_mismatch_count %} ({{ type_mismatch_count }}){% endif %}</a>
+  <a href="?tab=periode" class="{{ 'active' if tab=='periode' else '' }}">Periode ({{ period_count }})</a>
+  <a href="?tab=missing" class="{{ 'active' if tab=='missing' else '' }}">Missing Keys ({{ missing_count }})</a>
+  <a href="?tab=diffs" class="{{ 'active' if tab=='diffs' else '' }}">Value Diffs ({{ total_diff_count }})</a>
+  <a href="?tab=sql" class="{{ 'active' if tab=='sql' else '' }}">SQL</a>
+  <a href="?tab=log" class="{{ 'active' if tab=='log' else '' }}">Log{% if rt.status == 'error' %} ⚠{% endif %}</a>
+</div>
+
+{% if tab == 'ringkasan' %}
+  <div class="grid g2">
+    <div class="card">
+      <h3 style="margin-top:0;font-size:13px;text-transform:uppercase;color:var(--muted)">Report 1 — Table</h3>
+      <table class="tbl"><tbody>
+        <tr><td>Source rows</td><td class="mono">{{ rt.source_rows if rt.source_rows is not none else '—' }}</td></tr>
+        <tr><td>Target rows</td><td class="mono">{{ rt.target_rows if rt.target_rows is not none else '—' }}</td></tr>
+        <tr><td>Row diff</td><td class="mono">{{ rt.row_diff if rt.row_diff is not none else '—' }}</td></tr>
+        <tr><td>Source cols</td><td class="mono">{{ rt.source_cols if rt.source_cols is not none else '—' }}</td></tr>
+        <tr><td>Target cols</td><td class="mono">{{ rt.target_cols if rt.target_cols is not none else '—' }}</td></tr>
+        <tr><td>Extra target cols</td><td class="mono">{{ rt.extra_target_columns|join(', ') if rt.extra_target_columns else '—' }}</td></tr>
+      </tbody></table>
+    </div>
+    <div class="card">
+      <h3 style="margin-top:0;font-size:13px;text-transform:uppercase;color:var(--muted)">Row-level (Tier 2)</h3>
+      {% if rt.rl_metrics %}
+      <table class="tbl"><tbody>
+        <tr><td>Mode</td><td class="mono">{{ rt.rl_metrics.get('mode', rt.mode) }}</td></tr>
+        <tr><td>Missing in source</td><td class="mono">{{ rt.rl_metrics.missing_in_source }}</td></tr>
+        <tr><td>Missing in target</td><td class="mono">{{ rt.rl_metrics.missing_in_target }}</td></tr>
+        <tr><td>Differing values</td><td class="mono">{{ rt.rl_metrics.differing_values }}</td></tr>
+        <tr><td>Chunks</td><td class="mono">{{ rt.chunks_total }}</td></tr>
+      </tbody></table>
+      {% else %}
+        <p class="subtle">Tabel PASS di Tier 1 — row-level tidak perlu dijalankan.</p>
+      {% endif %}
+    </div>
+  </div>
+  {% if rt.investigate_query %}
+  <h3 style="font-size:13px;text-transform:uppercase;color:var(--muted);margin-top:20px">Query Investigasi (periode mismatch)</h3>
+  <div class="query-block">{{ rt.investigate_query }}</div>
+  {% endif %}
+{% endif %}
+
+{% if tab == 'agregat' %}
+  <div class="table-wrap"><table class="tbl">
+    <thead><tr><th>Kategori</th><th>Kolom</th><th>Metrik</th><th>Source</th><th>Target</th></tr></thead>
+    <tbody>
+    {% for f in agg_findings %}
+      <tr><td class="mono">{{ f.category }}</td><td class="mono">{{ f.column_name or '—' }}</td><td class="mono">{{ f.metric or '—' }}</td>
+          <td class="mono">{{ f.source_value }}</td><td class="mono">{{ f.target_value }}</td></tr>
+    {% else %}
+      <tr><td colspan="5" class="subtle">Tidak ada temuan agregat (PASS).</td></tr>
+    {% endfor %}
+    </tbody>
+  </table></div>
+{% endif %}
+
+{% if tab == 'tipekolom' %}
+  <p class="subtle" style="margin-top:0">
+    Perbandingan tipe data mentah antar source &amp; target per kolom — dipakai untuk memutuskan
+    apakah metrik statistik (Report 3) boleh dibandingkan sama sekali. Kolom dengan kategori BEDA
+    (mis. numeric vs string) otomatis dilewati dari perbandingan stat, jadi drift tipe seperti ini
+    sebelumnya tidak kelihatan di mana pun.
+  </p>
+  <div class="table-wrap"><table class="tbl">
+    <thead><tr><th>Kolom</th><th>Tipe Source</th><th>Tipe Target</th><th>Kategori</th></tr></thead>
+    <tbody>
+    {% for c in column_type_details %}
+      <tr><td class="mono">{{ c.column }}</td>
+          <td class="mono">{{ c.source_type or '—' }}</td>
+          <td class="mono">{{ c.target_type or '—' }}</td>
+          <td>
+            {% if c.category_match is none %}<span class="subtle">—</span>
+            {% elif c.category_match %}<span class="pill pass">✓ cocok</span>
+            {% else %}<span class="pill fail">✕ beda kategori</span>
+            {% endif %}
+          </td></tr>
+    {% else %}
+      <tr><td colspan="4" class="subtle">Belum ada data tipe kolom untuk tabel ini (run sebelum fitur
+        ini ditambahkan, atau tabel PASS di Tier 1 sebelum Report 3 sempat jalan).</td></tr>
+    {% endfor %}
+    </tbody>
+  </table></div>
+{% endif %}
+
+{% if tab == 'periode' %}
+  <p class="subtle" style="margin-top:0">
+    Hanya periode yang MISMATCH ditampilkan. Satu periode bisa punya lebih dari satu baris di sini:
+    baris "row count" kalau jumlah barisnya beda, DAN/ATAU satu baris per kolom+metrik statistik
+    (sum/min/max/datediff) yang nilainya beda meski jumlah barisnya sama persis (Δ tetap 0) — supaya
+    tidak terlihat seperti alarm palsu tanpa alasan.
+  </p>
+  <div class="table-wrap"><table class="tbl">
+    <thead><tr><th>Granularity</th><th>Periode</th><th>Jenis</th><th>Kolom</th><th>Source</th><th>Target</th><th>Δ</th></tr></thead>
+    <tbody>
+    {% for f in period_findings %}
+      <tr><td class="mono">{{ 'bulanan' if f.category=='period_monthly' else 'tahunan' }}</td>
+          <td class="mono">{{ f.period }}</td>
+          <td class="mono">{{ 'row count' if f.metric is none and f.column_name is none else f.metric }}</td>
+          <td class="mono">{{ f.column_name or '—' }}</td>
+          <td class="mono">{{ f.source_value }}</td><td class="mono">{{ f.target_value }}</td>
+          <td class="mono">{{ f.difference if f.difference is not none else '—' }}</td></tr>
+    {% else %}
+      <tr><td colspan="7" class="subtle">Tidak ada periode yang mismatch.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table></div>
+{% endif %}
+
+{% if tab == 'missing' %}
+  <div class="row-actions" style="margin-bottom:10px">
+    <button type="button" class="btn sm" onclick="copyKeys('/runs/{{ run.id }}/tables/{{ rt.id }}/keys?kind=missing_in_target')">📋 Copy key: hilang di TARGET</button>
+    <button type="button" class="btn sm" onclick="copyKeys('/runs/{{ run.id }}/tables/{{ rt.id }}/keys?kind=missing_in_source')">📋 Copy key: hilang di SOURCE</button>
+  </div>
+  {{ copy_panel() }}
+  <div class="table-wrap"><table class="tbl">
+    <thead><tr><th>Arah</th><th>Key</th></tr></thead>
+    <tbody>
+    {% for f in missing_findings %}
+      <tr><td class="mono">{{ 'target tidak punya (hilang di target)' if f.finding_type=='missing_in_target' else 'source tidak punya (hilang di source)' }}</td>
+          <td class="mono">{{ f.row_key }}</td></tr>
+    {% else %}
+      <tr><td colspan="2" class="subtle">Tidak ada missing key.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table></div>
+  {{ pager('missing') }}
+{% endif %}
+
+{% if tab == 'diffs' %}
+  {% if diff_columns %}
+  <form method="get" class="row-actions" style="margin-bottom:12px;align-items:center">
+    <input type="hidden" name="tab" value="diffs">
+    <label class="subtle" style="margin:0">Filter kolom:</label>
+    <select name="column" onchange="this.form.requestSubmit()">
+      <option value="">Semua kolom ({{ total_diff_count }})</option>
+      {% for col in diff_columns %}
+      <option value="{{ col }}" {{ 'selected' if selected_column == col else '' }}>{{ col }} ({{ diff_column_counts[col] }})</option>
+      {% endfor %}
+    </select>
+    {% if selected_column %}<a class="btn sm" href="?tab=diffs">✕ Hapus filter</a>{% endif %}
+  </form>
+  {% endif %}
+  <div class="row-actions" style="margin-bottom:10px">
+    <button type="button" class="btn sm" onclick="copyKeys('/runs/{{ run.id }}/tables/{{ rt.id }}/keys?kind=value_diff{{ '&column=' + selected_column if selected_column else '' }}')">📋 Copy key yang differing{{ ' (kolom: ' + selected_column + ')' if selected_column else ' (semua kolom, distinct)' }}</button>
+  </div>
+  {{ copy_panel() }}
+  <div class="table-wrap"><table class="tbl">
+    <thead><tr><th>Key</th><th>Kolom</th><th>Nilai Source</th><th>Nilai Target</th></tr></thead>
+    <tbody>
+    {% for f in diff_findings %}
+      <tr><td class="mono">{{ f.row_key }}</td><td class="mono">{{ f.column_name }}</td><td class="mono">{{ f.source_value }}</td><td class="mono">{{ f.target_value }}</td></tr>
+    {% else %}
+      <tr><td colspan="4" class="subtle">{{ 'Tidak ada value diff untuk kolom ini.' if selected_column else 'Tidak ada value diff.' }}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table></div>
+  {{ pager('diffs', '&column=' + selected_column if selected_column else '') }}
+{% endif %}
+
+{% if tab == 'sql' %}
+  {% for label, sql in (rt.queries or {}).items() %}
+    <div class="query-block"><span class="label">{{ label }}</span>{{ sql }}</div>
+  {% else %}
+    <p class="subtle">Tidak ada query tersimpan.</p>
+  {% endfor %}
+{% endif %}
+
+{% if tab == 'log' %}
+  {% if rt.error %}
+  <div class="flash error" style="margin-bottom:12px"><strong>Error:</strong> {{ rt.error }}</div>
+  {% endif %}
+  {% if rt.event_log %}
+  <p class="subtle" style="margin-top:0">Jejak proses validasi tabel ini ({{ rt.event_log|length }} event terakhir
+    — dibatasi 200; kalau error, traceback lengkap ada di paling bawah):</p>
+  <div class="log-box chrono">
+    {% for e in rt.event_log %}
+    <div class="line{% if e.kind in ('traceback', 'retry') %} err{% endif %}">[{{ e.ts }}] [{{ e.kind }}] {{ e.message }}</div>
+    {% endfor %}
+  </div>
+  {% else %}
+  <p class="subtle">Tidak ada log tersimpan untuk tabel ini — run ini jalan sebelum fitur log
+    ditambahkan, atau tabel di-reap saat server restart (thread-nya mati sebelum sempat menyimpan log).</p>
+  {% endif %}
+{% endif %}
+
+<script>
+// Backs the "📋 Copy key ..." buttons on the Missing Keys / Value Diffs
+// tabs -- fetches EVERY matching key (not just the current page; those
+// tabs are paginated) as a paste-ready SQL value list, selects it in a
+// textarea so a manual Ctrl+C always works, and best-effort auto-copies to
+// the clipboard (navigator.clipboard needs a secure context -- HTTPS or
+// localhost -- so it can silently fail on a plain-HTTP internal address;
+// the textarea fallback is the part that's guaranteed to work).
+var _copyLastText = '';
+
+function _tryClipboardCopy(text) {
+  var status = document.getElementById('copy-status');
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(function () {
+      status.textContent = '✓ Disalin ke clipboard.';
+      status.classList.add('ok-text');
+    }).catch(function () {
+      status.textContent = 'Auto-copy gagal (perlu HTTPS/localhost) — teks sudah di-select, tinggal Ctrl+C.';
+      status.classList.remove('ok-text');
+    });
+  } else {
+    status.textContent = 'Teks sudah di-select, tinggal Ctrl+C.';
+    status.classList.remove('ok-text');
+  }
+}
+
+function copyKeys(url) {
+  var backdrop = document.getElementById('copy-modal-backdrop');
+  var ta = document.getElementById('copy-textarea');
+  var status = document.getElementById('copy-status');
+  backdrop.style.display = 'flex';
+  ta.value = 'Memuat...';
+  status.textContent = '';
+  status.classList.remove('ok-text');
+  fetch(url)
+    .then(function (r) { return r.text(); })
+    .then(function (text) {
+      _copyLastText = text;
+      ta.value = text;
+      ta.focus();
+      ta.select();
+      _tryClipboardCopy(text);
+    })
+    .catch(function () {
+      ta.value = '';
+      status.textContent = 'Gagal memuat key dari server.';
+    });
+}
+
+function recopyKeys() {
+  var ta = document.getElementById('copy-textarea');
+  ta.focus();
+  ta.select();
+  _tryClipboardCopy(_copyLastText);
+}
+
+function closeCopyModal() {
+  document.getElementById('copy-modal-backdrop').style.display = 'none';
+}
+
+document.addEventListener('keydown', function (e) {
+  if (e.key === 'Escape') closeCopyModal();
+});
+</script>
+{% endblock %}
