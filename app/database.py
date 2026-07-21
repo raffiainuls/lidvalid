@@ -59,6 +59,14 @@ def get_db():
 def init_db() -> None:
     from . import models  # noqa: F401 - register models on Base before create_all
     Base.metadata.create_all(bind=engine)
+    if not _IS_SQLITE:
+        # The manual backfill below uses `PRAGMA table_info`, which is
+        # SQLite-only syntax. Not needed on a non-SQLite target anyway: every
+        # column/index it backfills (column_type_details, event_log,
+        # owner_id, the findings_rowlevel index) is already declared directly
+        # on the model in models.py, so create_all() above creates them from
+        # scratch on a fresh schema -- there's nothing pre-dating them to fix.
+        return
     # create_all() only creates brand-new tables -- it never alters a table
     # that already exists, so an Index/Column added to a model later (like
     # these, added for the table-drilldown pagination fix and the Tipe

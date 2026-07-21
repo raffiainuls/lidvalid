@@ -25,8 +25,9 @@ if (localStorage.getItem('vh_sidebar_collapsed') === '1') {
     <a href="/configs" title="Configs" class="{{ 'active' if active=='configs' else '' }}">🗂️ <span class="label">Configs</span></a>
     <a href="/connections" title="Connections" class="{{ 'active' if active=='connections' else '' }}">🔌 <span class="label">Connections</span></a>
     {% if user %}
+    <a href="/profile" title="Profil" class="{{ 'active' if active=='profile' else '' }}">👤 <span class="label">Profil</span></a>
     <div class="foot">
-      <div class="label">👤 {{ user.display_name or user.email }} ({{ user.role }})</div>
+      <div class="label">{{ user.display_name or user.email }} ({{ user.role }})</div>
       <form method="post" action="/logout" style="margin-top:6px">
         <button class="btn sm" type="submit" title="Logout">⏻ <span class="label">Logout</span></button>
       </form>

@@ -1,8 +1,4 @@
-{
-    email raffi.ainul@badr-interactive.com
-}
-
-43.134.129.64.sslip.io {
+{$CADDY_DOMAIN} {
     reverse_proxy app:8000
     encode gzip
 }

@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block title %}Profil — LidValid{% endblock %}
+{% block content %}
+<div class="page-header"><h1>Profil Saya</h1></div>
+
+<div class="card" style="max-width:560px">
+  <h3 style="margin-top:0">Informasi Akun</h3>
+  <form class="stack" method="post" action="/profile">
+    <div class="field">
+      <label>Nama Tampilan</label>
+      <input name="display_name" value="{{ user.display_name or '' }}" placeholder="mis. Raffi Ainul">
+    </div>
+    <div class="field">
+      <label>Email</label>
+      <input name="email" type="email" required value="{{ user.email }}">
+    </div>
+    <div class="field">
+      <label>Role</label>
+      <input value="{{ user.role }}" disabled>
+    </div>
+    <div class="row-actions">
+      <button class="btn acc" type="submit">Simpan Profil</button>
+    </div>
+  </form>
+</div>
+
+<div class="card" style="max-width:560px; margin-top:16px">
+  <h3 style="margin-top:0">Ubah Password</h3>
+  <form class="stack" method="post" action="/profile/password">
+    <div class="field">
+      <label>Password Saat Ini</label>
+      <input name="current_password" type="password" required autocomplete="current-password">
+    </div>
+    <div class="field">
+      <label>Password Baru</label>
+      <input name="new_password" type="password" required minlength="8" autocomplete="new-password">
+    </div>
+    <div class="field">
+      <label>Konfirmasi Password Baru</label>
+      <input name="confirm_password" type="password" required minlength="8" autocomplete="new-password">
+    </div>
+    <div class="row-actions">
+      <button class="btn acc" type="submit">Ubah Password</button>
+    </div>
+  </form>
+</div>
+{% endblock %}

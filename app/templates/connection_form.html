@@ -6,7 +6,7 @@
 <form class="stack" method="post" action="{{ '/connections/%d' % connection.id if connection else '/connections' }}">
   <div class="field">
     <label>Nama</label>
-    <input name="name" required value="{{ connection.name if connection else '' }}" placeholder="mis. MySQL Staging smile5">
+    <input name="name" required value="{{ connection.name if connection else '' }}" placeholder="mis. MySQL Staging">
   </div>
   <div class="field">
     <label>Engine</label>
@@ -18,7 +18,7 @@
   </div>
   <div class="field">
     <label>Host (diabaikan untuk engine sqlite)</label>
-    <input name="host" value="{{ connection.host if connection else '' }}" placeholder="10.x.x.x atau clickhouse-data.smile5.xyz">
+    <input name="host" value="{{ connection.host if connection else '' }}" placeholder="10.x.x.x atau clickhouse-host.example.com">
   </div>
   <div class="field">
     <label>Port</label>
@@ -26,7 +26,7 @@
   </div>
   <div class="field">
     <label>Database (untuk sqlite: path file .sqlite)</label>
-    <input name="database" value="{{ connection.database if connection else '' }}" placeholder="staging_smile5 atau d:/.../demo.sqlite">
+    <input name="database" value="{{ connection.database if connection else '' }}" placeholder="staging_db atau d:/.../demo.sqlite">
   </div>
   <div class="field">
     <label>Username</label>

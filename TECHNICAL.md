@@ -188,12 +188,26 @@ lidvalid/
 │   ├── templates/                        # Jinja2 — 1 file per halaman
 │   └── static/app.css                    # CSS (tanpa framework, tanpa build step)
 │
-├── tests/                                # pytest — 40 test, semua via SQLite lokal
-├── scripts/seed_demo.py                  # generator data demo + 1 run contoh
+├── tests/                                # pytest — 155 test, semua via SQLite lokal
+│   └── test_rbac.py                      # role gating (viewer/editor/admin) + data scoping (owner_id)
+├── scripts/
+│   ├── seed_demo.py                       # generator data demo + 1 run contoh
+│   └── create_user.py                     # CLI buat/update akun (belum ada UI user-management)
 ├── data/                                 # runtime: lidvalid.sqlite, secret.key, exports/
 ├── requirements.txt
-└── pytest.ini
+├── pytest.ini
+│
+├── Dockerfile                            # image produksi (python:3.12-slim, non-root)
+├── .dockerignore
+├── docker-compose.yml                    # app + Caddy, network "internal" ber-subnet tetap
+├── Caddyfile                             # reverse proxy + HTTPS otomatis (Let's Encrypt/sslip.io)
+├── .env.example                          # template env var produksi (LIDVALID_*)
+└── .gitignore
 ```
+
+Lihat §9 (RBAC & Data Scoping) dan §10 (Deployment) untuk penjelasan bagian yang ditambahkan
+setelah migrasi ke VPS (2026-07-21) — rebrand dari nama sebelumnya (ValidaHub), penegakan role,
+per-user data scoping, containerization, dan arsitektur akses database staging dari VPS.
 
 ---
 
@@ -1421,14 +1435,16 @@ bukan memaksa/retry terus, tapi biarkan `init_db()` yang menjalankannya otomatis
 13 kelas SQLAlchemy, masing-masing = 1 tabel. Berikut peta relasinya:
 
 ```
-User                    (1 tabel, berdiri sendiri — login)
-
+User                    (1 tabel, berdiri sendiri — login + role)
+   │
+   │ owner_id (FK, nullable) — lihat §9
+   ▼
 Connection ──┬── ValidationConfig.source_connection_id
              └── ValidationConfig.target_connection_id
-                       │
+                       │  (juga punya owner_id)
                        ├── ConfigTable (1 config punya N table mapping)
                        │
-                       └── Run (1 config bisa dijalankan berkali-kali)
+                       └── Run (1 config bisa dijalankan berkali-kali, juga punya owner_id)
                                 │
                                 └── RunTable (1 run punya N baris, 1 per ConfigTable)
                                         │
@@ -1437,6 +1453,15 @@ Connection ──┬── ValidationConfig.source_connection_id
 
 RunEvent — didefinisikan tapi TIDAK DIPAKAI aktif (lihat catatan di §6.8)
 ```
+
+**`owner_id` (ditambahkan 2026-07-21, lihat §9)** — `Connection`, `ValidationConfig`, dan `Run`
+masing-masing punya `owner_id = Column(Integer, ForeignKey("users.id"), nullable=True)`. `User`,
+`ConfigTable`, `RunTable`, `FindingAggregate`, `FindingRowLevel` **TIDAK** punya kolom ini —
+kepemilikan cukup dilacak di level "akar" (Connection/Config/Run), baris turunannya (ConfigTable,
+RunTable, Finding) otomatis ikut ter-scope lewat JOIN ke parent-nya di query (lihat §9.2). Kolom ini
+`nullable=True` supaya `Base.metadata.create_all()` tidak bentrok dengan kode lama yang belum
+mengenal field ini, dan supaya jalur ALTER TABLE (§5.1) bisa menambah kolom ke database yang sudah
+ada tanpa perlu NOT NULL default palsu.
 
 Field JSON (mis. `ConfigTable.key_columns`, `RunTable.agg_metrics`) memakai tipe `JSON` bawaan
 SQLAlchemy — di SQLite disimpan sebagai TEXT (serialize/deserialize otomatis oleh SQLAlchemy), di
@@ -1472,6 +1497,15 @@ def _load_or_create_key() -> bytes:
     env_key = os.environ.get("LIDVALID_SECRET_KEY")
     if env_key:
         return env_key.encode() if isinstance(env_key, str) else env_key
+    if os.environ.get("LIDVALID_ENV", "development") == "production":
+        raise RuntimeError(
+            "LIDVALID_SECRET_KEY must be set when LIDVALID_ENV=production -- refusing "
+            "to fall back to data/secret.key, which would silently break decryption of "
+            "every already-stored connection secret and invalidate all sessions on the "
+            "next redeploy. Generate one with: python -c \"from cryptography.fernet "
+            "import Fernet; print(Fernet.generate_key().decode())\""
+        )
+    _KEY_PATH.parent.mkdir(exist_ok=True)
     if _KEY_PATH.exists():
         return _KEY_PATH.read_bytes()
     key = Fernet.generate_key()
@@ -1481,12 +1515,25 @@ def _load_or_create_key() -> bytes:
 _fernet = Fernet(_load_or_create_key())
 ```
 Urutan prioritas kunci enkripsi: (1) environment variable `LIDVALID_SECRET_KEY` kalau di-set
-(cocok untuk produksi — kunci tidak pernah menyentuh disk lokal), (2) file `data/secret.key` kalau
-sudah ada (dev/demo — dibuat sekali, dipakai berulang di run berikutnya), (3) kalau tidak ada
-keduanya, GENERATE baru dan simpan ke file supaya persist untuk run berikutnya. `_fernet` adalah
-objek Fernet SATU-SATUNYA yang dipakai seluruh aplikasi (dibuat sekali saat module di-import
-pertama kali — bukan per-request), memakai algoritma AES-128 dalam mode CBC dengan HMAC untuk
-autentikasi (skema standar library `cryptography`).
+(cocok untuk produksi — kunci tidak pernah menyentuh disk lokal), (2) **kalau `LIDVALID_ENV=production`
+dan kunci itu TIDAK di-set — gagal keras (`RuntimeError`), TIDAK diam-diam jatuh ke file lokal**, (3)
+file `data/secret.key` kalau sudah ada (dev/demo — dibuat sekali, dipakai berulang di run berikutnya),
+(4) kalau tidak ada satu pun, GENERATE baru dan simpan ke file supaya persist untuk run berikutnya.
+`_fernet` adalah objek Fernet SATU-SATUNYA yang dipakai seluruh aplikasi (dibuat sekali saat module
+di-import pertama kali — bukan per-request), memakai algoritma AES-128 dalam mode CBC dengan HMAC
+untuk autentikasi (skema standar library `cryptography`).
+
+**Kenapa cek (2) ditambahkan (2026-07-21, saat migrasi ke VPS)**: kunci ini dipakai untuk DUA hal
+sekaligus — enkripsi password koneksi database (`encrypt_secret`/`decrypt_secret` di bawah) DAN
+signing session cookie (`SessionMiddleware`, §5.12). Kalau di produksi kunci ini sampai jatuh ke
+fallback file lokal (mis. karena volume `data/` tidak ter-mount dengan benar saat container
+di-recreate), lalu container itu di-*rebuild* tanpa volume yang sama, file `secret.key` yang baru
+akan ter-generate ULANG — bukan cuma memutus SEMUA sesi login yang aktif, tapi juga membuat SETIAP
+`Connection.secret_encrypted` yang sudah tersimpan **permanen tidak bisa didekripsi lagi** (kunci
+lama hilang). Exception yang gagal-cepat di startup jauh lebih baik daripada kehilangan data secara
+diam-diam beberapa hari kemudian. Lihat §10.4 untuk `LIDVALID_SECRET_KEY` di deployment VPS
+sungguhan (nilainya harus SAMA dengan yang dulu dipakai men-enkripsi database yang dimigrasi, bukan
+di-generate baru).
 
 ```python
 def hash_password(password: str) -> str:
@@ -1532,9 +1579,44 @@ otomatis redirect ke halaman login (dengan `?next=` supaya setelah login user di
 halaman yang tadinya dituju) — tidak perlu menulis pengecekan `if not user: return redirect(...)`
 berulang-ulang di SETIAP fungsi route.
 
-`require_role(*roles)` sudah disiapkan sebagai dependency factory (`Depends(require_role("admin"))`)
-tapi **belum dipasang** di route mana pun secara default — lihat README bagian "Deviasi" soal RBAC
-belum ditegakkan penuh.
+```python
+def require_role(*roles: str):
+    def _dep(user: models.User = Depends(require_login)) -> models.User:
+        if user.role not in roles and user.role != "admin":
+            raise RedirectToLogin()
+        return user
+    return _dep
+```
+`require_role(*roles)` **sekarang aktif dipasang** di route yang butuh lebih dari sekadar login
+(§9.1) — dependency FACTORY: `Depends(require_role("editor"))` mengembalikan sebuah dependency baru
+yang, di belakang layar, DULU memanggil `require_login` (jadi user yang belum login tetap kena
+redirect ke `/login` seperti biasa), BARU KEMUDIAN mengecek role. `user.role != "admin"` di baris
+kondisi berarti **admin selalu lolos apa pun argumen `roles`-nya** — TIDAK ADA hierarki
+viewer→editor→admin di sini; memanggil `require_role("viewer")` justru SALAH (akan menolak editor,
+karena `"editor" not in ("viewer",)` dan role-nya bukan `"admin"`). Konvensi yang dipakai konsisten
+di seluruh `routers/`: route viewer-boleh-akses pakai `require_login` polos, route editor-ke-atas
+pakai `require_role("editor")`, tidak ada route yang admin-only murni (lihat §9.1 kenapa).
+
+```python
+def is_admin(user: models.User) -> bool:
+    return user.role == "admin"
+
+def scope_query(query, model, user: models.User):
+    if is_admin(user):
+        return query
+    return query.filter(model.owner_id == user.id)
+
+def check_owner(obj, user: models.User) -> None:
+    if obj is None or (not is_admin(user) and obj.owner_id != user.id):
+        raise HTTPException(status_code=404)
+```
+Tiga helper ini (ditambahkan 2026-07-21) menegakkan **per-user data scoping** — dibahas lengkap di
+§9.2. Ringkas: `scope_query()` dipakai di route LIST (nambah `.filter(owner_id == user.id)` kalau
+bukan admin), `check_owner()` dipakai di route yang mengambil SATU objek by-id (`db.get(...)`) —
+melempar `404` (bukan `RedirectToLogin`/303) kalau objeknya tidak ada ATAU user bukan admin dan
+bukan pemiliknya. `404`, bukan `403`, dipilih dengan sengaja: menyembunyikan bahkan KEBERADAAN baris
+milik user lain, bukan cuma menolak aksesnya — praktik keamanan umum supaya user B tidak bisa
+menyimpulkan "oh, config id 42 itu ADA, cuma bukan punya saya" hanya dari kode status yang berbeda.
 
 ### 5.5 `services/connections_service.py`
 
@@ -1993,6 +2075,20 @@ apa pun — desain minimal, tidak membuat sheet kosong percuma.
 
 ### 5.10 `routers/ui.py` — Semua Halaman & Form
 
+**RBAC + data scoping (2026-07-21)** — setiap route di file ini sekarang di-anotasi salah satu dari
+tiga pola (lihat §9.1 untuk matriks lengkap per-route, §5.4 untuk definisi helper-nya):
+- `user: models.User = Depends(require_login)` — viewer ke atas boleh, cuma BACA.
+- `user: models.User = Depends(require_role("editor"))` — editor/admin boleh, aksi MENGUBAH data.
+- Route LIST (`connections_list`, `configs_list`, `dashboard`, dst) memanggil
+  `scope_query(db.query(Model), Model, user)` alih-alih `db.query(Model)` polos.
+- Route SATU-OBJEK (`connection_edit_form`, `config_detail`, `run_detail`, dst) memanggil
+  `check_owner(obj, user)` tepat setelah `db.get(...)`, SEBELUM baris kode lain menyentuh objek itu.
+
+Satu route yang SEBELUMNYA tidak punya dependency auth apa pun — `run_tables_fragment`
+(`GET /runs/{run_id}/tables-fragment`, dipanggil oleh polling JS di §5.13) — ditemukan saat audit
+RBAC ini dan diperbaiki (ditambah `require_login` + `check_owner` pada `Run`-nya). Regression test:
+`tests/test_rbac.py::test_unauthorized_tables_fragment_now_requires_login`.
+
 **`asset_version` (Jinja global, di-set sekali saat import modul ini)**:
 ```python
 _STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
@@ -2284,17 +2380,24 @@ diubah sejak itu. Regression test: `tests/test_copy_keys.py`.
 @router.get("/runs/{run_id}/status")
 def run_status(run_id, user=Depends(require_login), db=Depends(get_db)):
     run = db.get(models.Run, run_id)
+    check_owner(run, user)
     return {"id": run.id, "status": run.status, "summary": run.summary or {}}
 ```
 FastAPI otomatis meng-encode dictionary Python ini jadi JSON (tidak perlu `jsonify()` manual
 seperti di Flask) — cukup `return` dictionary biasa. Endpoint ini dipanggil oleh JavaScript
 `fetch()` di `run_detail.html` setiap 2 detik selagi status masih `"running"`/`"queued"`.
+`check_owner()` (§5.4/§9.2) di sini mengembalikan `404` JSON kalau `run_id` bukan milik user yang
+sedang polling — mencegah user B melihat status run milik user A hanya dengan menebak-nebak ID di
+URL polling-nya sendiri.
 
 ```python
 @router.get("/configs/{config_id}/table-columns")
 def config_table_columns(config_id, table: str, side: str = "source",
-                          user=Depends(require_login), db=Depends(get_db)):
+                          user=Depends(require_role("editor")), db=Depends(get_db)):
     cfg = db.get(models.ValidationConfig, config_id)
+    if not cfg:
+        return {"columns": [], "error": "config not found"}
+    check_owner(cfg, user)
     conn = cfg.target_connection if side == "target" else cfg.source_connection
     if not table:
         return {"columns": []}
@@ -2304,6 +2407,9 @@ def config_table_columns(config_id, table: str, side: str = "source",
     except Exception as exc:
         return {"columns": [], "error": str(exc)}
 ```
+`require_role("editor")` (bukan `require_login` polos) karena endpoint ini HANYA dipanggil dari
+alur config-builder (§5.13) yang sudah editor-only di sisi UI-nya — konsisten dengan
+`config_new_form`/`config_save_tables` yang jadi sumber form-nya.
 Endpoint KEDUA ini adalah versi AJAX dari mekanisme yang sudah dijalankan SERVER-SIDE untuk
 tabel yang dikenal saat render (`_table_columns_for()`, §5.10) — bedanya, dipanggil dari
 JAVASCRIPT (bukan Jinja), untuk baris yang ditambah manual lewat tombol "+ Tambah baris" di
@@ -2333,18 +2439,49 @@ def _bootstrap_admin():
     db = SessionLocal()
     try:
         if db.query(models.User).count() == 0:
-            admin = models.User(email="admin@lidvalid.local", password_hash=security.hash_password("admin123"), ...)
+            email = os.environ.get("LIDVALID_ADMIN_EMAIL")
+            password = os.environ.get("LIDVALID_ADMIN_PASSWORD")
+            if not email or not password:
+                if os.environ.get("LIDVALID_ENV", "development") == "production":
+                    raise RuntimeError("LIDVALID_ADMIN_EMAIL/PASSWORD wajib di production...")
+                email = email or "admin@lidvalid.local"
+                password = password or "admin123"
+                print("WARNING: bootstrapping with DEV-ONLY demo admin credentials.")
+            admin = models.User(email=email, password_hash=security.hash_password(password), role="admin", ...)
             db.add(admin)
             db.commit()
-            print("... kredensial dicetak ke konsol ...")
     finally:
         db.close()
 ```
 `init_db()` (dari `database.py`) memanggil `Base.metadata.create_all(bind=engine)` — SQLAlchemy
 otomatis membuat SEMUA tabel yang belum ada berdasarkan class model yang sudah didefinisikan (lihat
 §5.2). Kalau tabel `users` MASIH KOSONG (`count() == 0` — hanya terjadi di run PERTAMA aplikasi
-ini), otomatis dibuat 1 user admin bootstrap dengan password default, dicetak ke konsol supaya
-user tahu kredensialnya tanpa harus baca kode.
+ini di database yang benar-benar baru), dibuat 1 user admin bootstrap.
+
+**Env-driven (2026-07-21)** — sebelumnya email/password admin bootstrap HARDCODED
+(`admin@lidvalid.local`/`admin123`) tanpa syarat. Sekarang: kalau `LIDVALID_ADMIN_EMAIL` DAN
+`LIDVALID_ADMIN_PASSWORD` di-set (mis. di VPS produksi lewat `.env`), itu yang dipakai untuk admin
+pertama — kredensial demo tidak pernah tersentuh. Kalau salah satu/keduanya TIDAK di-set: di
+`LIDVALID_ENV=production` langsung `RuntimeError` (gagal start, bukan diam-diam pakai kredensial
+demo di produksi); di dev/lokal, jatuh ke kredensial demo seperti sebelumnya (dengan warning
+tercetak) supaya `uvicorn app.main:app --reload` tanpa `.env` apa pun tetap langsung bisa dipakai.
+Perhatikan bahwa blok ini HANYA jalan kalau `users` masih kosong — pada database yang SUDAH punya
+user (mis. hasil migrasi, §9.3), env var ini tidak dibaca sama sekali, jadi aman di-set atau tidak.
+
+### 5.12b `scripts/create_user.py` (ditambahkan 2026-07-21)
+
+Belum ada halaman user-management di UI sama sekali (tidak ada `/users`, tidak ada tombol "Tambah
+User" di mana pun) — jadi ini satu-satunya cara membuat akun KEDUA, ketiga, dst:
+```bash
+.venv/Scripts/python.exe scripts/create_user.py --email a@b.com --password secret --role editor --name "Jane Doe"
+```
+Pola file-nya sama seperti `seed_demo.py` (§5.7-ish) — `sys.path.insert(0, ...)` lalu import
+langsung `app.database`/`app.models`/`app.security`, TANPA lewat HTTP/TestClient. Kalau email yang
+diberikan SUDAH ADA, akun itu di-UPDATE (password/role/nama) alih-alih membuat duplikat — inilah
+cara mengganti kredensial demo admin (`admin@lidvalid.local`) setelah deploy: jalankan script ini
+lagi dengan email yang sama, password baru. Dipakai juga untuk membuat akun viewer/editor
+sungguhan di produksi, dan (di `tests/test_rbac.py`, lewat pola serupa langsung ke ORM, bukan
+script ini) untuk membuat akun uji RBAC.
 
 ```python
 reaped = run_service.reap_orphaned_runs(db)
@@ -2554,12 +2691,13 @@ users
   id, email, password_hash, display_name, role, is_active
 
 connections
-  id, name, engine, host, port, database, username,
+  id, owner_id → users.id (nullable, lihat §9), name, engine, host, port, database, username,
   secret_encrypted (BLOB terenkripsi), params (JSON), status, last_tested_at
 
 validation_configs
-  id, name, description, source_connection_id → connections.id,
-  target_connection_id → connections.id, default_mode, settings (JSON)
+  id, owner_id → users.id (nullable, lihat §9), name, description,
+  source_connection_id → connections.id, target_connection_id → connections.id,
+  default_mode, settings (JSON)
 
 config_tables
   id, config_id → validation_configs.id, source_table, target_table,
@@ -2567,7 +2705,10 @@ config_tables
   mode_override, enabled
 
 runs
-  id, config_id → validation_configs.id, trigger_type, mode, status,
+  id, owner_id → users.id (nullable, lihat §9 — DIWARISKAN dari config.owner_id saat run dibuat,
+  BUKAN dari user yang menekan tombol "Run" — supaya kalau admin men-trigger run milik user lain,
+  hasilnya tetap muncul di dashboard PEMILIK config, bukan admin),
+  config_id → validation_configs.id, trigger_type, mode, status,
   started_at, finished_at, summary (JSON: {tables_total, pass, fail, error})
 
 run_tables
@@ -2589,7 +2730,7 @@ findings_rowlevel
 
 ## 7. Testing — Strategi & Cara Kerja
 
-144 test di `tests/`, SEMUA jalan terhadap SQLite lokal (tidak ada dependensi jaringan/VPN):
+155 test di `tests/`, SEMUA jalan terhadap SQLite lokal (tidak ada dependensi jaringan/VPN):
 
 | File | Yang diuji |
 |---|---|
@@ -2610,6 +2751,7 @@ findings_rowlevel
 | `test_run_cancel.py` | Regression test untuk 2 bug independen di insiden Cancel (§5.8, README) — `vc_run_table` di-fake jadi `time.sleep` (tanpa data sungguhan): (1) `table_concurrency=2` + 20 tabel, cancel diminta 0,2 detik setelah start, memverifikasi run selesai jauh lebih cepat daripada durasi broken-nya dan tabel yang belum sempat jalan berstatus `cancelled` bukan `pass`; (2) cancel diminta SEBELUM `start_run_async` dipanggil sama sekali (deterministik, tidak bergantung timing) — memverifikasi SEMUA tabel jadi `cancelled` (bukan tertinggal `running` selamanya, bug `_summarize_run` yang terlewat) |
 | `test_column_type_details.py` | `_build_column_type_details()` murni — flag kategori mismatch untuk kolom shared, kolom yang cuma ada di satu sisi dapat `category_match=None` bukan `False`, `column_details` kosong menghasilkan list kosong |
 | `test_asset_versioning.py` | Insiden cache CSS basi (§5.10, README) — `asset_version` (Jinja global, mtime `app.css`) ikut dirender di `<link>` stylesheet tiap halaman (`href="/static/app.css?v=<mtime>"`) sehingga perubahan CSS di masa depan otomatis dapat URL baru dan tidak lagi disajikan dari cache browser lama; nilai `asset_version` dicocokkan langsung ke mtime file `app.css` sungguhan |
+| `test_rbac.py` | RBAC + data scoping (§9, ditambahkan 2026-07-21) — viewer bisa baca dashboard/configs/connections tapi dibalik ke `/login` (303) untuk route editor+ (bikin koneksi, bikin config); editor bisa bikin koneksi & config, `owner_id` ke-stamp; regression test route `tables-fragment` yang dulu tanpa auth sama sekali sekarang wajib login; editor A tidak bisa lihat/akses config-connection-run milik editor B (hilang dari list, `404` di akses langsung termasuk endpoint JSON `/api/runs/{id}/status`); admin bisa lihat DAN edit data milik user lain (bypass ownership, bukan cuma lihat) |
 
 `tests/conftest.py` menyediakan fixture `orders_pair` & `identical_pair` — masing-masing membuat 2
 file `.sqlite` sungguhan di direktori temp pytest (`tmp_path`), lalu membuka `Connector` sungguhan
@@ -2690,3 +2832,317 @@ Jalankan: `.venv\Scripts\python.exe -m pytest -v`
    `_persist_rowlevel_findings()`), simpan dengan `category` baru.
 2. Filter kategori itu di `app/routers/ui.py::table_drilldown()`.
 3. Tambah tab baru di `table_drilldown.html`.
+
+---
+
+## 9. RBAC & Per-User Data Scoping (2026-07-21)
+
+Ditambahkan sebagai bagian dari migrasi ke VPS produksi (§10) — sebelumnya aplikasi ini SATU-USER
+saja secara efektif (semua orang yang login melihat SEMUA data yang sama, `require_role` didefinisikan
+tapi tidak dipasang di mana pun). Dua pertanyaan dari pemilik produk yang menentukan desainnya:
+"kalau ada user baru, dia lihat config/hasil validasi yang lama tidak?" → TIDAK (setiap user cuma
+lihat miliknya sendiri) — dan "connection (koneksi database) juga per-user, bukan cuma
+config/run?" → YA, ketiganya (Connection, ValidationConfig, Run) di-scope sama.
+
+### 9.1 Matriks Role × Route
+
+Konvensi (didefinisikan di `auth.py`, §5.4): **viewer** = `require_login` polos (baca saja);
+**editor** = `require_role("editor")` (kelola MILIKNYA SENDIRI); **admin** selalu bypass — baik
+role check (`require_role` manapun) MAUPUN ownership check (`check_owner`/`scope_query`). Tidak ada
+route yang admin-only murni — pembeda admin bukan "bisa akses route yang lain tidak bisa", tapi
+"bisa akses/ubah DATA yang lain tidak bisa".
+
+| Area | Route | Role minimum | Scoping |
+|---|---|---|---|
+| Dashboard | `GET /dashboard` | viewer | `scope_query` di 3 query Run (recent/running/trend) + JOIN ke Run di query problem-tables |
+| Connections | `GET /connections` | viewer | `scope_query` |
+| | `GET /connections/new`, `POST /connections` | **editor** | `owner_id=user.id` di-stamp saat create |
+| | `GET .../{id}/edit`, `POST .../{id}` | **editor** | `check_owner` |
+| | `POST .../{id}/test` | **editor** | `check_owner` |
+| | `POST .../{id}/delete` | **editor** | `check_owner` |
+| Configs | `GET /configs` | viewer | `scope_query` + `filter_by(is_archived=False)` |
+| | `GET /configs/new`, `POST /configs` | **editor** | `owner_id=user.id` di-stamp; connection sumber/target divalidasi `check_owner` juga (cegah config nempel ke connection user lain lewat form yang di-tamper) |
+| | `GET /configs/{id}`, `POST .../suggest`, `POST .../copy-from`, `POST .../tables` | **editor**\* | `check_owner` pada config (dan pada config LAIN yang jadi sumber "copy-from") |
+| | `GET /configs/{id}/status`, `POST .../rerun-table` | **editor**\* | `check_owner` |
+| | `POST /configs/{id}/run` | **editor** | `check_owner`; Run baru mewarisi `owner_id` dari config (lihat §9.2) |
+| Runs | `GET /runs/{id}`, `GET .../export.xlsx`, `GET .../tables/{id}`, `GET .../tables/{id}/keys` | viewer\*\* | `check_owner` pada Run |
+| | `GET /runs/{id}/tables-fragment` | viewer | `check_owner` — **route ini dulu TANPA auth sama sekali**, ditemukan & diperbaiki saat audit ini |
+| | `POST .../cancel`, `POST .../resume` | **editor** | `check_owner` |
+| API | `GET /api/runs/{id}/status` | viewer | `check_owner` |
+| | `GET /api/configs/{id}/table-columns` | **editor** | `check_owner` (dipakai HANYA dari alur config-builder yang editor-only) |
+
+\* `config_detail`/`config_table_status` sendiri (GET, lihat isinya) sebenarnya `require_login`
+(viewer boleh LIHAT), tapi aksi form di halaman yang sama (suggest/copy-from/save tables/run/rerun)
+semuanya editor-only — jadi viewer bisa membuka halaman config, tapi setiap tombol aksinya akan
+memantulkannya ke `/login` kalau ditekan.
+\*\* Sama untuk halaman run detail — semua tab/lihat adalah `require_login`, cuma cancel/resume yang
+editor-only.
+
+Route publik TANPA auth sama sekali (tidak berubah): `GET/POST /login`, `POST /logout`, `GET /`
+(redirect ke dashboard).
+
+### 9.2 Mekanisme Scoping
+
+```python
+def scope_query(query, model, user):
+    if is_admin(user):
+        return query
+    return query.filter(model.owner_id == user.id)
+
+def check_owner(obj, user):
+    if obj is None or (not is_admin(user) and obj.owner_id != user.id):
+        raise HTTPException(status_code=404)
+```
+Dua fungsi ini (`auth.py`, §5.4) menutup SEMUA jalur akses: `scope_query` untuk daftar (list), 
+`check_owner` untuk objek tunggal yang diambil lewat `db.get(Model, id)`. `check_owner` melempar
+`404` — BUKAN `403` — supaya user B tidak bisa membedakan "id ini tidak ada" dari "id ini ada tapi
+bukan punya saya" hanya dari kode status; keduanya terlihat identik dari luar.
+
+**Tabel turunan (`ConfigTable`, `RunTable`, `FindingAggregate`, `FindingRowLevel`) TIDAK punya
+`owner_id` sendiri** — kepemilikannya implisit lewat parent yang SUDAH di-`check_owner` sebelum kode
+menyentuh anak-anaknya. Contoh: `table_drilldown()` memanggil `check_owner(run, user)` pada `Run`
+di awal fungsi, BARU KEMUDIAN mem-query `FindingRowLevel` lewat `run_table_id` — kalau `run` bukan
+milik user, fungsi sudah berhenti (404) sebelum baris `FindingRowLevel` mana pun ter-query. Pola ini
+konsisten di semua route yang menyentuh data turunan.
+
+**`Run.owner_id` diwariskan dari `ValidationConfig.owner_id`, bukan dari user yang menekan tombol
+"Run"** (`run_service.create_run()`, §5.8):
+```python
+run = models.Run(owner_id=config.owner_id, config_id=config.id, ...)
+```
+Alasannya: karena editor cuma bisa men-trigger run pada config MILIKNYA SENDIRI (`check_owner`
+sudah menjamin ini SEBELUM `create_run` dipanggil), `config.owner_id` dan `user.id`-nya editor
+SELALU sama untuk kasus editor. Bedanya baru terlihat kalau **admin** yang men-trigger run pada
+config milik user lain (admin bypass ownership check, jadi BISA) — dalam kasus itu, hasil run tetap
+harus muncul di dashboard PEMILIK ASLI config-nya (yang mungkin sedang login bersamaan), bukan
+"menghilang" ke akun admin. Mewarisi dari config, bukan dari user pemicu, menjamin ini.
+
+### 9.3 Migrasi Data Lama (Backfill)
+
+Database yang sudah berjalan LAMA sebelum fitur `owner_id` ada (§10.7 — dipindah dari laptop
+pengembangan ke VPS) sudah punya baris `connections`/`validation_configs`/`runs` dengan `owner_id`
+kosong. `database.py::init_db()` (§5.1) menangani ini otomatis di setiap startup:
+```python
+for table in ("connections", "validation_configs", "runs"):
+    cols = {row[1] for row in conn.execute(text(f"PRAGMA table_info({table})"))}
+    if "owner_id" not in cols:
+        conn.execute(text(f"ALTER TABLE {table} ADD COLUMN owner_id INTEGER"))
+admin_row = conn.execute(text("SELECT id FROM users WHERE role = 'admin' ORDER BY id LIMIT 1")).fetchone()
+if admin_row:
+    admin_id = admin_row[0]
+    for table in ("connections", "validation_configs", "runs"):
+        conn.execute(text(f"UPDATE {table} SET owner_id = :aid WHERE owner_id IS NULL"), {"aid": admin_id})
+```
+`ALTER TABLE ADD COLUMN` (kalau kolomnya belum ada — cek `PRAGMA table_info`, sama seperti backfill
+`column_type_details`/`event_log` di §5.1) lalu `UPDATE ... WHERE owner_id IS NULL` meng-assign
+SEMUA baris yang belum punya pemilik ke admin PERTAMA yang ditemukan. Ini **no-op yang aman** di dua
+skenario berbeda: (1) database FRESH (instalasi baru) — belum ada baris `connections`/dst sama
+sekali saat `init_db()` jalan (dipanggil SEBELUM `_bootstrap_admin()` di `main.py`, §5.12, jadi juga
+belum ada admin untuk di-assign-i — query `admin_row` kosong, blok `if admin_row:` dilewati), (2)
+database yang SUDAH pernah di-backfill sebelumnya — `WHERE owner_id IS NULL` tidak match apa pun.
+`scripts/seed_demo.py` (§5.7) juga diperbarui untuk men-stamp `owner_id` pada Connection/Config yang
+dibuatnya, konsisten dengan pola ini.
+
+---
+
+## 10. Deployment — Docker, Caddy, dan VPS (2026-07-21)
+
+Aplikasi ini SEBELUMNYA hanya dijalankan lewat `uvicorn app.main:app --reload` langsung di laptop
+pengembangan — tidak ada `Dockerfile`, tidak ada `docker-compose.yml`, tidak ada `git` sama sekali
+(lihat README "Deviasi dari arsitektur target"). Bagian ini mendokumentasikan containerization dan
+migrasi ke VPS produksi (`43.134.129.64`, direktori `~/lidvalid`), TERMASUK dua gotcha jaringan
+nyata yang perlu waktu untuk didiagnosis.
+
+### 10.1 `Dockerfile`
+
+```dockerfile
+FROM python:3.12-slim
+...
+RUN useradd --create-home --uid 1000 lidvalid && mkdir -p /app/data && chown -R lidvalid:lidvalid /app
+USER lidvalid
+EXPOSE 8000
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+```
+Single-stage (bukan multi-stage build) — aplikasi ini kecil (tidak ada langkah kompilasi/bundling
+terpisah dari `pip install`), jadi kompleksitas multi-stage tidak sepadan manfaatnya di skala ini.
+`useradd --uid 1000` dipilih SPESIFIK karena user `ubuntu` di VPS target juga `uid=1000` — volume
+`./data:/app/data` (compose, di bawah) jadi otomatis punya kepemilikan yang cocok tanpa perlu
+`chown` manual tambahan di host tiap kali container di-recreate. `build-essential`/`libffi-dev`
+di-install (lalu TIDAK dihapus di layer yang sama, sengaja — single-stage, bukan multi-stage) untuk
+jaga-jaga `cryptography` butuh kompilasi dari source di platform tertentu (jarang terjadi, image
+`python:3.12-slim` biasanya sudah dapat manylinux wheel, tapi murah untuk disiapkan).
+
+`.dockerignore` mengecualikan `.venv/`, `.git/`, `data/` (runtime, di-mount lewat volume — BUKAN
+di-bake ke image), `tests/`, dan dua file dokumentasi besar (README/TECHNICAL) yang tidak perlu ada
+di image produksi.
+
+### 10.2 `docker-compose.yml` — app + Caddy
+
+```yaml
+services:
+  app:
+    build: .
+    env_file: .env
+    environment:
+      - LIDVALID_ENV=production
+    volumes:
+      - ./data:/app/data
+    networks: [internal]
+    extra_hosts:
+      - "host.docker.internal:172.28.1.1"
+
+  caddy:
+    image: caddy:2-alpine
+    ports: ["80:80", "443:443"]
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks: [internal]
+
+networks:
+  internal:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.1.0/24
+          gateway: 172.28.1.1
+```
+`app` **tidak pernah mem-publish port ke host** (tidak ada `ports:` di service `app`) — satu-satunya
+jalan masuk adalah lewat `caddy`, yang meneruskan ke `app:8000` lewat network Docker internal
+(`reverse_proxy app:8000` di Caddyfile, §10.3). Ini diverifikasi langsung: `curl` ke
+`http://<ip>:8000` dari LUAR VPS timeout/refused, sementara `https://<ip>.sslip.io` (lewat Caddy)
+normal — port 8000 memang tidak pernah ter-expose ke internet.
+
+`networks.internal.ipam` (subnet+gateway EKSPLISIT, bukan dibiarkan Docker meng-auto-assign) adalah
+perbaikan dari masalah nyata — lihat §10.6 untuk cerita lengkapnya (kenapa subnet harus tetap,
+bukan auto).
+
+### 10.3 `Caddyfile` — HTTPS Otomatis Tanpa Domain
+
+```
+{
+    email raffi.ainul@badr-interactive.com
+}
+
+43.134.129.64.sslip.io {
+    reverse_proxy app:8000
+    encode gzip
+}
+```
+Domain sungguhan belum ada saat deploy pertama — **sslip.io** dipakai sebagai gantinya: layanan DNS
+publik yang meng-embed alamat IP langsung di hostname-nya (`<ip>.sslip.io` selalu resolve ke `<ip>`
+itu sendiri), jadi berperilaku PERSIS seperti domain asli untuk keperluan ACME (Let's Encrypt)
+tanpa perlu membeli/mendaftarkan apa pun. Caddy otomatis meminta & memperbarui sertifikat TLS lewat
+tantangan HTTP-01 di port 80 — tidak ada langkah manual sama sekali (`docker compose logs caddy`
+menunjukkan `"certificate obtained successfully"` pada deploy pertama). Kalau nanti ada domain
+sungguhan: cukup ganti baris hostname di Caddyfile, `docker compose restart caddy` — Caddy akan
+meminta sertifikat baru untuk domain itu otomatis, tidak ada perubahan lain yang dibutuhkan.
+
+### 10.4 Environment Variables Produksi (`.env`, dari `.env.example`)
+
+```
+LIDVALID_ENV=production
+LIDVALID_SECRET_KEY=<harus SAMA dengan kunci yang dulu mengenkripsi database yang dimigrasi>
+LIDVALID_ADMIN_EMAIL=      # kosong OK -- database migrasi sudah punya admin, bootstrap tidak jalan
+LIDVALID_ADMIN_PASSWORD=
+```
+`.env` **tidak** ikut ke git (`.gitignore`) — dibuat manual di VPS. Untuk deployment INI spesifik
+(migrasi database yang SUDAH ADA, bukan instalasi baru kosong), `LIDVALID_SECRET_KEY` diisi dengan
+kunci yang SAMA seperti `data/secret.key` di laptop pengembangan (lihat §5.3 kenapa ini kritis —
+kunci yang beda = semua `Connection.secret_encrypted` yang ter-migrasi jadi sampah tak
+terdekripsi). `LIDVALID_ADMIN_EMAIL/PASSWORD` boleh dibiarkan kosong karena `_bootstrap_admin()`
+(§5.12) hanya jalan kalau tabel `users` kosong — database yang dimigrasi sudah punya baris admin.
+
+### 10.5 VPS — Hardening di Server *Shared*
+
+VPS target (`43.134.129.64`, Ubuntu 24.04) BUKAN server khusus untuk aplikasi ini — sudah menjalankan
+beberapa project lain milik pemiliknya (di port 3111, 3121, 8090, plus Tailscale-nya sendiri untuk
+keperluan tidak terkait). Konsekuensinya, hardening di sini LEBIH HATI-HATI daripada server kosong:
+
+- **UFW**: `default deny incoming`, TAPI dengan `allow` eksplisit untuk SEMUA port yang sudah dipakai
+  project lain (22 SSH, 80/443 buat LidValid, PLUS 3111/3121/8090 project lain) — supaya menyalakan
+  firewall tidak diam-diam mematikan akses ke project lain yang sedang berjalan.
+- **fail2ban**: jail `sshd` default saja diaktifkan (belum ada jail khusus Caddy/`/login` — itu
+  butuh access log JSON Caddy dengan format tertentu, belum disiapkan di iterasi ini).
+- **Password SSH SENGAJA TIDAK DIMATIKAN** (`PasswordAuthentication yes` tetap) — keputusan eksplisit
+  pemilik server, karena dia kadang login dari device lain yang belum tentu punya key terdaftar.
+  Ini penyimpangan dari praktik "matikan password auth, key-only" yang lazim direkomendasikan,
+  tapi konsisten dengan pola dokumen ini (§8, README) untuk mencatat keputusan yang MEMANG disengaja
+  meski berbeda dari default yang "lebih aman di atas kertas".
+
+### 10.6 Konektivitas ke Database Staging — SSH Reverse Tunnel
+
+ClickHouse (`clickhouse-data.smile5.xyz`) dan MySQL RDS staging cuma bisa diakses lewat VPN privat
+(OpenVPN, terpisah dari Tailscale yang ada di VPS untuk keperluan lain). VPS tidak (belum) punya
+profile OpenVPN sendiri — solusi SEMENTARA yang dipilih: **SSH reverse tunnel** dari laptop
+pengembang (yang OpenVPN-nya aktif) ke VPS:
+```bash
+ssh -i ~/.ssh/lidvalid_vps -N -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o ExitOnForwardFailure=yes \
+  -R 0.0.0.0:8123:clickhouse-data.smile5.xyz:8123 \
+  -R 0.0.0.0:3306:app-smile5-uat.cxeycqoo6axz.ap-southeast-3.rds.amazonaws.com:3306 \
+  ubuntu@43.134.129.64
+```
+`-N` (tanpa remote command, murni port forwarding), `-R <port>:<host>:<port>` (reverse — port itu
+dibuka DI SISI SERVER/VPS, diteruskan lewat tunnel balik ke laptop, yang lalu meneruskannya lagi
+lewat OpenVPN-nya ke host aslinya). **Trade-off yang disadari dan diterima**: koneksi ke database
+staging HANYA hidup selama proses SSH ini jalan DAN OpenVPN laptop aktif — kalau laptop mati/sleep
+atau SSH terputus, VPS kehilangan akses ke staging (tapi aplikasi tetap bisa diakses publik dan
+menampilkan data yang SUDAH tersimpan — cuma tidak bisa test/jalankan validasi baru terhadap
+database staging sungguhan sampai tunnel dinyalakan lagi). Jalur permanen (OpenVPN langsung di VPS,
+profile terpisah dari milik laptop) direncanakan sebagai langkah lanjutan — kalau itu terjadi,
+`Connection` di UI tinggal diganti host-nya dari `host.docker.internal` (di bawah) ke hostname asli
+(`clickhouse-data.smile5.xyz` dst) TANPA perlu ubah kode/redeploy apa pun.
+
+**Dua gotcha jaringan yang ditemukan & diperbaiki saat setup ini:**
+
+1. **`host.docker.internal` resolve ke gateway bridge yang SALAH.** Docker Compose punya fitur
+   `extra_hosts: ["host.docker.internal:host-gateway"]` yang, secara teori, membuat hostname itu
+   otomatis menunjuk ke gateway network Docker milik CONTAINER itu sendiri. Di host Linux ini,
+   nilai `host-gateway` ternyata resolve ke gateway bridge Docker DEFAULT (`172.17.0.1`, `docker0`)
+   — BUKAN gateway network custom `internal` yang container `app` ini benar-benar terhubung ke
+   sana (yang saat itu auto-assigned Docker ke `172.18.0.1`). Container tidak punya rute apa pun ke
+   `172.17.0.1` (tidak terhubung ke bridge itu sama sekali), jadi `host.docker.internal:8123` selalu
+   timeout. **Perbaikan**: pin subnet+gateway network `internal` secara MANUAL di
+   `docker-compose.yml` (`ipam.config`, §10.2) jadi `172.28.1.0/24` / gateway `172.28.1.1` yang
+   stabil, lalu set `extra_hosts` ke IP gateway itu SECARA EKSPLISIT (bukan `host-gateway` lagi).
+2. **UFW memblokir traffic dari container ke host lewat bridge**, bahkan setelah gateway-nya benar.
+   `ufw default deny incoming` ternyata berlaku juga untuk paket yang datang dari network bridge
+   Docker menuju proses HOST (di sini: listener `sshd` untuk reverse tunnel, bind ke `0.0.0.0:8123`)
+   — bukan cuma untuk trafik dari internet luar. Docker mengelola iptables-nya SENDIRI (biasanya
+   untuk *port publishing* container keluar), tapi TIDAK otomatis meng-exempt trafik container→host
+   yang masuk lewat jalur ini dari kebijakan UFW. **Perbaikan**: `ufw allow from 172.28.1.0/24 to
+   any port 8123 proto tcp` (dan port 3306) — mengizinkan HANYA dari subnet bridge itu (bukan dari
+   internet), jadi tunnel tetap tidak ter-expose publik.
+
+Kedua perbaikan ini diverifikasi dengan test koneksi langsung dari DALAM container:
+```python
+import socket
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM); s.settimeout(5)
+s.connect(("host.docker.internal", 8123))  # ClickHouse — REACHABLE setelah fix
+```
+
+### 10.7 Migrasi Data — Dari Laptop ke VPS
+
+Database SQLite yang sudah berisi data sungguhan (17 config, 19 koneksi, 30 run, ~138 MB) dipindah
+UTUH ke VPS, bukan mulai dari kosong:
+1. `tar -czf ... --exclude .venv --exclude __pycache__ --exclude .env .` di laptop (termasuk `data/`
+   DAN `.git/` — TIDAK di-exclude, supaya riwayat commit ikut pindah).
+2. `scp` tarball ke VPS, `tar -xzf` ke `~/lidvalid`.
+3. `.env` dibuat manual di VPS (§10.4) dengan `LIDVALID_SECRET_KEY` yang SAMA seperti sumbernya.
+4. `docker compose up -d --build` — `_bootstrap_admin()` (§5.12) mendeteksi tabel `users` SUDAH
+   berisi 1 baris (admin lama), TIDAK membuat admin baru — kredensial & seluruh data ter-migrasi
+   apa adanya.
+5. Akun admin yang ter-migrasi masih memakai email brand LAMA (`admin@validahub.local`, dari
+   SEBELUM rebrand ke LidValid, §1/README) — email SATU baris ini diupdate manual lewat query ORM
+   langsung (bukan lewat `create_user.py`, karena itu match by-email dan email lamanya belum
+   diketahui sebagai "LidValid" oleh siapa pun sampai diperiksa manual) jadi `admin@lidvalid.local`,
+   password direset lewat `scripts/create_user.py` (§5.12b) supaya ada kredensial yang diketahui.
+
+**Catatan mtime WAL**: SQLite dalam mode WAL (§5.1) bisa punya file pendamping `lidvalid.sqlite-wal`
+/`-shm` yang berisi data BELUM ter-checkpoint ke file utama. Sebelum tar dibuat, pastikan proses
+aplikasi yang memegang WAL itu sudah berhenti bersih (`docker compose down` bukan `kill -9`) —
+kalau tidak, database yang di-transfer bisa kehilangan write terbaru yang masih di WAL. Di migrasi
+ini, `docker compose down` sebelum tar sudah cukup men-checkpoint WAL kembali ke file utama (file
+`-wal`/`-shm` tidak ada lagi setelahnya, ukuran file utama justru bertambah — tanda checkpoint
+berhasil), jadi tidak perlu langkah manual tambahan.

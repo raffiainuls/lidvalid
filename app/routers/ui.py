@@ -125,6 +125,42 @@ def root():
     return RedirectResponse(url="/dashboard")
 
 
+# -------------------------------------------------------------------- profile
+@router.get("/profile", response_class=HTMLResponse)
+def profile_page(request: Request, user: models.User = Depends(require_login)):
+    return templates.TemplateResponse(request, "profile.html", {
+        "request": request, "user": user, "active": "profile",
+    })
+
+
+@router.post("/profile")
+def profile_update(display_name: str = Form(""), email: str = Form(...),
+                    user: models.User = Depends(require_login), db: Session = Depends(get_db)):
+    email = email.strip()
+    dupe = db.query(models.User).filter(models.User.email == email, models.User.id != user.id).first()
+    if dupe:
+        return RedirectResponse(url="/profile?error=Email sudah dipakai user lain", status_code=303)
+    user.display_name = display_name.strip()
+    user.email = email
+    db.commit()
+    return RedirectResponse(url="/profile?ok=Profil diperbarui", status_code=303)
+
+
+@router.post("/profile/password")
+def profile_change_password(current_password: str = Form(...), new_password: str = Form(...),
+                             confirm_password: str = Form(...),
+                             user: models.User = Depends(require_login), db: Session = Depends(get_db)):
+    if not security.verify_password(current_password, user.password_hash):
+        return RedirectResponse(url="/profile?error=Password saat ini salah", status_code=303)
+    if new_password != confirm_password:
+        return RedirectResponse(url="/profile?error=Konfirmasi password baru tidak cocok", status_code=303)
+    if len(new_password) < 8:
+        return RedirectResponse(url="/profile?error=Password baru minimal 8 karakter", status_code=303)
+    user.password_hash = security.hash_password(new_password)
+    db.commit()
+    return RedirectResponse(url="/profile?ok=Password diperbarui", status_code=303)
+
+
 # ---------------------------------------------------------------- dashboard
 @router.get("/dashboard", response_class=HTMLResponse)
 def dashboard(request: Request, user: models.User = Depends(require_login), db: Session = Depends(get_db)):
