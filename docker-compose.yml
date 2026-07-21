@@ -12,6 +12,17 @@ services:
       - postgres_data:/var/lib/postgresql/data
     networks:
       - internal
+    # Bound ONLY to this host's Tailscale interface (not 0.0.0.0) -- lets a
+    # teammate's machine on the same tailnet connect a locally-run copy of
+    # this app straight to the shared database (e.g. to run validations that
+    # need a VPN this VPS itself doesn't have) without exposing Postgres to
+    # the public internet at all. TAILSCALE_IP is this VPS's own tailnet
+    # address (`tailscale ip`), kept in .env (untracked) rather than
+    # hardcoded here since it's VPS-specific and would otherwise bake a real
+    # infra address into a tracked file. Leave TAILSCALE_IP unset to skip
+    # publishing this port entirely.
+    ports:
+      - "${TAILSCALE_IP:-127.0.0.1}:5432:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
       interval: 5s
