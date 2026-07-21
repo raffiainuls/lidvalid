@@ -54,9 +54,19 @@ def columns_by_table(conn: models.Connection, table_names: list[str]) -> dict[st
     that supports it) rather than one query per table -- real incident: a
     99-table config took minutes to open because the old per-table loop paid
     a full network round-trip per table over a VPN/SSH-tunneled connection.
-    Falls back to the same per-table loop only if the bulk query itself
-    blows up (e.g. a transient network blip mid-query), so a single bad
-    table still can't blank the whole page.
+
+    An EARLIER version of this function fell back to that same per-table
+    loop if the bulk query raised -- meant for "one bad table" cases, but a
+    batched `WHERE table_name IN (...)` query can't actually fail that way
+    (a missing/unreadable table just doesn't appear in the results, it
+    doesn't raise). The only realistic way get_schemas_bulk raises is the
+    CONNECTION itself being unreachable -- and retrying per-table then means
+    up to `len(table_names)` more attempts against the same dead connection,
+    each paying its own full connect_timeout. On a 99-table config with an
+    unreachable host, that turned a single ~30s failure into a ~50-MINUTE
+    one -- worse than the N+1 bug this was built to fix. No retry loop, so a
+    dead connection fails once, fast, same as the connector-construction
+    failure below.
 
     Tables that fail to introspect (dropped table, no read privilege, ...)
     map to `[]` rather than raising, so one bad table doesn't blank the page
@@ -72,16 +82,7 @@ def columns_by_table(conn: models.Connection, table_names: list[str]) -> dict[st
         try:
             return connector.get_schemas_bulk(conn.database, table_names)
         except Exception:
-            result: dict[str, list[str]] = {}
-            for name in table_names:
-                if name in result:
-                    continue
-                try:
-                    df = connector.get_schema(conn.database, name)
-                    result[name] = df["column_name"].tolist() if "column_name" in df.columns else []
-                except Exception:
-                    result[name] = []
-            return result
+            return {name: [] for name in table_names}
     finally:
         connector.close()
 

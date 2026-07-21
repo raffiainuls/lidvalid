@@ -194,7 +194,6 @@ export interface ConfigDetail {
   tables: ConfigTableRow[];
   runs: RunListItem[];
   configs_for_copy: ConfigForCopy[];
-  table_columns: Record<string, string[]>;
   owner_username: string | null;
   is_mine: boolean;
   shared_permission: ConfigSharePermission | null;

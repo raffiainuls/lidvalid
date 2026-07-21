@@ -447,13 +447,32 @@ def api_get_config(config_id: int, user: models.User = Depends(require_login_api
             {"id": c.id, "name": c.name, "table_count": len(c.tables)}
             for c in _other_configs_for_copy(db, config_id, user)
         ],
-        "table_columns": discovery_service.columns_by_table(
-            cfg.source_connection, [t.source_table for t in cfg.tables]
-        ),
         "owner_username": owner.username if owner else None,
         "is_mine": is_mine,
         "shared_permission": share.permission if share else None,
         "can_manage_shares": is_admin(user) or is_mine,
+    }
+
+
+@router.get("/configs/{config_id}/table-columns-bulk")
+def api_config_table_columns_bulk(config_id: int, user: models.User = Depends(require_login_api),
+                                   db: Session = Depends(get_db)):
+    """Column-dropdown data for the table-mapping editor, split out of
+    api_get_config on purpose: it's the one part of that page that needs a
+    LIVE query against the config's actual source database, which can take
+    up to a connector's connect_timeout (30s) when that database isn't
+    reachable from this server. Bundled into the main response, that delay
+    blocked the whole page -- including the run history, which someone with
+    no reason to touch table mappings (e.g. a share'd viewer just checking
+    results) would still have to sit through. Fetched as its own request so
+    the rest of the page renders immediately regardless of how long -- or
+    whether -- this one resolves."""
+    cfg = db.get(models.ValidationConfig, config_id)
+    check_config_access(db, cfg, user, "view")
+    return {
+        "table_columns": discovery_service.columns_by_table(
+            cfg.source_connection, [t.source_table for t in cfg.tables]
+        ),
     }
 
 

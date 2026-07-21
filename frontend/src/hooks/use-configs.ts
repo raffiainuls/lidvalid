@@ -24,6 +24,19 @@ export function useConfig(id: number) {
   });
 }
 
+// Split out of useConfig on purpose -- this is the one piece of the config
+// page that needs a LIVE query against the config's actual source database,
+// which can take up to ~30s when that database isn't reachable from this
+// server. Fetching it as its own request means the rest of the page (config
+// info, run history) renders immediately regardless of how long this takes.
+export function useConfigTableColumnsBulk(configId: number) {
+  return useQuery({
+    queryKey: ["configs", configId, "table-columns-bulk"],
+    queryFn: () => api.get<{ table_columns: Record<string, string[]> }>(`/configs/${configId}/table-columns-bulk`),
+    enabled: Number.isFinite(configId),
+  });
+}
+
 export function useCreateConfig() {
   const queryClient = useQueryClient();
   return useMutation({
@@ -36,7 +49,7 @@ export function useSaveConfigTables(configId: number) {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (rows: ConfigTableRowInput[]) =>
-      api.put<{ tables: ConfigDetail["tables"]; table_columns: ConfigDetail["table_columns"] }>(
+      api.put<{ tables: ConfigDetail["tables"]; table_columns: Record<string, string[]> }>(
         `/configs/${configId}/tables`,
         { rows },
       ),

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { Plus, Search, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -12,6 +12,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import {
+  useConfigTableColumnsBulk,
   useCopyFromConfig,
   useSaveConfigTables,
   useSuggestMappings,
@@ -70,9 +71,19 @@ function blankRow(): EditableRow {
 
 export function TableMappingEditor({ config, readOnly = false }: { config: ConfigDetail; readOnly?: boolean }) {
   const [rows, setRows] = useState<EditableRow[]>(() => config.tables.map(fromSaved));
-  const [tableColumns, setTableColumns] = useState<Record<string, string[]>>(config.table_columns);
+  const [tableColumns, setTableColumns] = useState<Record<string, string[]>>({});
   const [prefix, setPrefix] = useState("");
   const [copyFromId, setCopyFromId] = useState<string>("");
+
+  // Loads independently of the page itself (see useConfigTableColumnsBulk) --
+  // dropdowns just render as plain text inputs (existing fallback for any
+  // table with no known columns) until this resolves.
+  const { data: bulkColumnsData } = useConfigTableColumnsBulk(config.id);
+  useEffect(() => {
+    if (bulkColumnsData?.table_columns) {
+      setTableColumns((prev) => ({ ...bulkColumnsData.table_columns, ...prev }));
+    }
+  }, [bulkColumnsData]);
 
   const saveMutation = useSaveConfigTables(config.id);
   const suggestMutation = useSuggestMappings(config.id);
