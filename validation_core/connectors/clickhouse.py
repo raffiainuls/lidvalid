@@ -257,6 +257,21 @@ class ClickHouseConnector(Connector):
         df = self.query_df(q)
         return df["t"].tolist() if "t" in df.columns else []
 
+    def get_schemas_bulk(self, database: str, tables: list[str]) -> dict[str, list[str]]:
+        if not tables:
+            return {}
+        in_list = ", ".join(f"'{t}'" for t in tables)
+        q = (
+            f"SELECT table AS t, name AS column_name FROM system.columns "
+            f"WHERE database = '{database}' AND table IN ({in_list}) ORDER BY table, position"
+        )
+        df = self.query_df(q)
+        result: dict[str, list[str]] = {t: [] for t in tables}
+        if "t" in df.columns:
+            for t, group in df.groupby("t"):
+                result[t] = group["column_name"].tolist()
+        return result
+
     def get_primary_key(self, database: str, table: str) -> list[str]:
         # ClickHouse has no PRIMARY KEY concept like MySQL -- `sorting_key`
         # (the table's ORDER BY clause) is the closest natural-key signal,

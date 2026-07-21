@@ -1,0 +1,172 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+@import "@fontsource-variable/geist";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+    --font-heading: var(--font-sans);
+    --font-sans: 'Geist Variable', sans-serif;
+    --color-sidebar-ring: var(--sidebar-ring);
+    --color-sidebar-border: var(--sidebar-border);
+    --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+    --color-sidebar-accent: var(--sidebar-accent);
+    --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+    --color-sidebar-primary: var(--sidebar-primary);
+    --color-sidebar-foreground: var(--sidebar-foreground);
+    --color-sidebar: var(--sidebar);
+    --color-chart-5: var(--chart-5);
+    --color-chart-4: var(--chart-4);
+    --color-chart-3: var(--chart-3);
+    --color-chart-2: var(--chart-2);
+    --color-chart-1: var(--chart-1);
+    --color-ring: var(--ring);
+    --color-input: var(--input);
+    --color-border: var(--border);
+    --color-destructive: var(--destructive);
+    --color-accent-foreground: var(--accent-foreground);
+    --color-accent: var(--accent);
+    --color-muted-foreground: var(--muted-foreground);
+    --color-muted: var(--muted);
+    --color-secondary-foreground: var(--secondary-foreground);
+    --color-secondary: var(--secondary);
+    --color-primary-foreground: var(--primary-foreground);
+    --color-primary: var(--primary);
+    --color-popover-foreground: var(--popover-foreground);
+    --color-popover: var(--popover);
+    --color-card-foreground: var(--card-foreground);
+    --color-card: var(--card);
+    --color-foreground: var(--foreground);
+    --color-background: var(--background);
+    --radius-sm: calc(var(--radius) * 0.6);
+    --radius-md: calc(var(--radius) * 0.8);
+    --radius-lg: var(--radius);
+    --radius-xl: calc(var(--radius) * 1.4);
+    --radius-2xl: calc(var(--radius) * 1.8);
+    --radius-3xl: calc(var(--radius) * 2.2);
+    --radius-4xl: calc(var(--radius) * 2.6);
+
+    /* Status semantics (pass/fail/error/running/off) -- carried over from
+       the old app.css design system, exposed as Tailwind utilities
+       (bg-status-pass-bg text-status-pass, etc.) for the run/table pills. */
+    --color-status-pass: var(--status-pass);
+    --color-status-pass-bg: var(--status-pass-bg);
+    --color-status-fail: var(--status-fail);
+    --color-status-fail-bg: var(--status-fail-bg);
+    --color-status-error: var(--status-error);
+    --color-status-error-bg: var(--status-error-bg);
+    --color-status-running: var(--status-running);
+    --color-status-running-bg: var(--status-running-bg);
+    --color-status-off: var(--status-off);
+    --color-status-off-bg: var(--status-off-bg);
+}
+
+/* Palette carried over from app/static/app.css (the pre-rewrite Jinja2 UI)
+   so the React rewrite keeps LidValid's brand identity (teal accent, status
+   colors) instead of shadcn's default neutral zinc theme -- only the
+   component polish/spacing/motion comes from shadcn, not the hue. */
+:root {
+    --background: #f4f5f4;
+    --foreground: #20272b;
+    --card: #ffffff;
+    --card-foreground: #20272b;
+    --popover: #ffffff;
+    --popover-foreground: #20272b;
+    --primary: #0e7569;
+    --primary-foreground: #ffffff;
+    --secondary: #e2f0ee;
+    --secondary-foreground: #0b5c53;
+    --muted: #eceff0;
+    --muted-foreground: #67737a;
+    --accent: #eceff0;
+    --accent-foreground: #20272b;
+    --destructive: #b3554d;
+    --destructive-foreground: #ffffff;
+    --border: #dde2e4;
+    --input: #dde2e4;
+    --ring: #0e7569;
+    --chart-1: #0e7569;
+    --chart-2: #3f6fae;
+    --chart-3: #2e8a5f;
+    --chart-4: #b07818;
+    --chart-5: #b3554d;
+    --radius: 0.5rem;
+    --sidebar: #ffffff;
+    --sidebar-foreground: #20272b;
+    --sidebar-primary: #0e7569;
+    --sidebar-primary-foreground: #ffffff;
+    --sidebar-accent: #eceff0;
+    --sidebar-accent-foreground: #20272b;
+    --sidebar-border: #dde2e4;
+    --sidebar-ring: #0e7569;
+
+    --status-pass: #2e8a5f;
+    --status-pass-bg: #e3f2ea;
+    --status-fail: #b07818;
+    --status-fail-bg: #f8eed7;
+    --status-error: #b3554d;
+    --status-error-bg: #f9e7e5;
+    --status-running: #3f6fae;
+    --status-running-bg: #e5edf7;
+    --status-off: #67737a;
+    --status-off-bg: #eceff0;
+}
+
+.dark {
+    --background: #181c1e;
+    --foreground: #e4e9eb;
+    --card: #20262a;
+    --card-foreground: #e4e9eb;
+    --popover: #20262a;
+    --popover-foreground: #e4e9eb;
+    --primary: #4fb3a5;
+    --primary-foreground: #0b241f;
+    --secondary: #123832;
+    --secondary-foreground: #7fd3c6;
+    --muted: #262d31;
+    --muted-foreground: #93a0a7;
+    --accent: #262d31;
+    --accent-foreground: #e4e9eb;
+    --destructive: #e08a82;
+    --destructive-foreground: #2a0f0d;
+    --border: #343d42;
+    --input: #343d42;
+    --ring: #4fb3a5;
+    --chart-1: #4fb3a5;
+    --chart-2: #7ba7dd;
+    --chart-3: #5cc492;
+    --chart-4: #d9a94e;
+    --chart-5: #e08a82;
+    --sidebar: #20262a;
+    --sidebar-foreground: #e4e9eb;
+    --sidebar-primary: #4fb3a5;
+    --sidebar-primary-foreground: #0b241f;
+    --sidebar-accent: #262d31;
+    --sidebar-accent-foreground: #e4e9eb;
+    --sidebar-border: #343d42;
+    --sidebar-ring: #4fb3a5;
+
+    --status-pass: #5cc492;
+    --status-pass-bg: #173328;
+    --status-fail: #d9a94e;
+    --status-fail-bg: #37301a;
+    --status-error: #e08a82;
+    --status-error-bg: #3a2321;
+    --status-running: #7ba7dd;
+    --status-running-bg: #1d2b3d;
+    --status-off: #93a0a7;
+    --status-off-bg: #262d31;
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+    }
+  body {
+    @apply bg-background text-foreground;
+    }
+  html {
+    @apply font-sans;
+    }
+}

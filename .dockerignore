@@ -11,3 +11,5 @@ x
 x.sqlite
 README.md
 TECHNICAL.md
+frontend/node_modules/
+frontend/dist/

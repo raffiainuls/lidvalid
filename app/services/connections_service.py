@@ -10,10 +10,18 @@ from validation_core.connectors import ConnectionParams, create_connector
 from .. import models, security
 
 
+_TUNNEL_ALIAS = "host.docker.internal"
+
+
 def to_connection_params(conn: models.Connection) -> ConnectionParams:
+    # use_tunnel routes the actual connection through the SSH reverse-tunnel
+    # alias (see docker-compose.yml's extra_hosts) instead of `conn.host` --
+    # `conn.host` itself stays the real, portable hostname (unaffected, still
+    # what's shown/edited in the UI and what a VPN-connected machine would use).
+    host = _TUNNEL_ALIAS if conn.use_tunnel else (conn.host or "")
     return ConnectionParams(
         engine=conn.engine,
-        host=conn.host or "",
+        host=host,
         port=conn.port or 0,
         database=conn.database or "",
         username=conn.username or "",
@@ -23,7 +31,15 @@ def to_connection_params(conn: models.Connection) -> ConnectionParams:
 
 
 def test_connection(conn: models.Connection) -> dict:
-    connector = create_connector(to_connection_params(conn))
+    try:
+        connector = create_connector(to_connection_params(conn))
+    except Exception as exc:  # noqa: BLE001 - some connectors (e.g. ClickHouse)
+        # actually open a connection while being constructed, not just on the
+        # first query -- a dead network path (host down, tunnel closed) then
+        # raised here, BEFORE the try/finally below, surfacing as a raw 500
+        # instead of the normal "Test gagal: ..." flash every other failure
+        # mode gets.
+        return {"ok": False, "latency_ms": None, "error": str(exc)}
     try:
         return connector.test_connection()
     finally:
@@ -33,10 +49,13 @@ def test_connection(conn: models.Connection) -> dict:
 def test_connection_payload(engine: str, host: str, port: int, database: str,
                              username: str, password: str, params: dict | None = None) -> dict:
     """Test a connection without persisting it first (Add-connection form)."""
-    connector = create_connector(ConnectionParams(
-        engine=engine, host=host, port=port, database=database,
-        username=username, password=password, params=params or {},
-    ))
+    try:
+        connector = create_connector(ConnectionParams(
+            engine=engine, host=host, port=port, database=database,
+            username=username, password=password, params=params or {},
+        ))
+    except Exception as exc:  # noqa: BLE001 - see test_connection() above
+        return {"ok": False, "latency_ms": None, "error": str(exc)}
     try:
         return connector.test_connection()
     finally:

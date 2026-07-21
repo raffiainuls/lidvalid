@@ -20,7 +20,7 @@ META_COLUMNS = frozenset({'ingested_at', 'version', '_dlt_load_id', '_dlt_id'})
 
 _CATEGORIES = {
     'numeric': [
-        'int', 'tinyint', 'smallint', 'mediumint', 'bigint',
+        'int', 'integer', 'tinyint', 'smallint', 'mediumint', 'bigint',
         'float', 'double', 'decimal', 'real', 'numeric',
         'int8', 'int16', 'int32', 'int64',
         'uint8', 'uint16', 'uint32', 'uint64',
@@ -33,6 +33,12 @@ _CATEGORIES = {
         # (mismatched category slipping through), `length(UInt16)` raised in
         # ClickHouse. Declaring 'year' numeric here fixes it at the source.
         'year',
+        # Oracle's NUMBER covers both integers and decimals (no separate
+        # int/float types) -- without this it fell through to the 'string'
+        # fallback below and every stat/period comparison involving an
+        # Oracle numeric column got skipped (category mismatch vs the
+        # other side's real numeric type).
+        'number',
     ],
     'string': [
         'varchar', 'char', 'text', 'tinytext', 'mediumtext',

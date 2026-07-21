@@ -6,9 +6,9 @@ a second account -- e.g. to hand out real accounts after replacing the demo
 admin, or to create viewer/editor test accounts for RBAC verification.
 
 Usage:
-    .venv/Scripts/python.exe scripts/create_user.py --email a@b.com --password secret --role editor --name "Jane Doe"
+    .venv/Scripts/python.exe scripts/create_user.py --username jane --password secret --role editor --name "Jane Doe"
 
-If the email already exists, its password/role/name are updated instead of
+If the username already exists, its password/role/name are updated instead of
 creating a duplicate.
 """
 from __future__ import annotations
@@ -27,7 +27,7 @@ VALID_ROLES = ("admin", "editor", "viewer")
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--email", required=True)
+    parser.add_argument("--username", required=True)
     parser.add_argument("--password", required=True)
     parser.add_argument("--role", required=True, choices=VALID_ROLES)
     parser.add_argument("--name", default="", help="Display name (optional)")
@@ -36,24 +36,24 @@ def main() -> None:
     init_db()
     db = SessionLocal()
     try:
-        user = db.query(models.User).filter_by(email=args.email).first()
+        user = db.query(models.User).filter_by(username=args.username).first()
         if user:
             user.password_hash = security.hash_password(args.password)
             user.role = args.role
             if args.name:
                 user.display_name = args.name
             db.commit()
-            print(f"Updated existing user: {args.email} (role={args.role})")
+            print(f"Updated existing user: {args.username} (role={args.role})")
         else:
             user = models.User(
-                email=args.email,
+                username=args.username,
                 password_hash=security.hash_password(args.password),
-                display_name=args.name or args.email.split("@")[0],
+                display_name=args.name or args.username,
                 role=args.role,
             )
             db.add(user)
             db.commit()
-            print(f"Created user: {args.email} (role={args.role})")
+            print(f"Created user: {args.username} (role={args.role})")
     finally:
         db.close()
 

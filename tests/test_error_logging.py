@@ -122,11 +122,14 @@ def test_errored_table_persists_reason_and_event_log(tmp_path):
 
 
 def test_log_tab_renders_error_and_traceback(tmp_path):
+    """Ported to GET /api/runs/{id}/tables/{id} (JSON `error`/`event_log`
+    fields) when the frontend moved to a React SPA -- the "Log" tab's HTML
+    rendering of these same fields is now the SPA's concern, not the API's."""
     client, db_module, models_module = _make_app(tmp_path)
     with client:
         run, _tables = _run_config_with_bad_table(tmp_path, db_module, models_module)
-        r = client.post("/login", data={"email": "admin@lidvalid.local", "password": "admin123"})
-        assert r.status_code in (200, 303)
+        r = client.post("/api/login", json={"username": "admin", "password": "admin123"})
+        assert r.status_code == 200
 
         db = db_module.SessionLocal()
         try:
@@ -136,8 +139,9 @@ def test_log_tab_renders_error_and_traceback(tmp_path):
         finally:
             db.close()
 
-        r = client.get(f"/runs/{run.id}/tables/{bad_id}?tab=log")
+        r = client.get(f"/api/runs/{run.id}/tables/{bad_id}")
         assert r.status_code == 200
-        assert "Error:" in r.text            # the flash banner with rt.error
-        assert "traceback" in r.text          # the trail's final entry kind
-        assert "Traceback (most recent call last)" in r.text
+        data = r.json()
+        assert data["error"]  # the banner's source: rt.error
+        assert data["event_log"][-1]["kind"] == "traceback"
+        assert "Traceback (most recent call last)" in data["event_log"][-1]["message"]

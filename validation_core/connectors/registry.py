@@ -5,11 +5,19 @@ from .base import Connector, ConnectionParams
 from .mysql import MySqlConnector
 from .clickhouse import ClickHouseConnector
 from .sqlite_demo import SqliteConnector
+from .postgres import PostgresConnector
+from .oracle import OracleConnector
+from .athena import AthenaConnector
+from .maxcompute import MaxComputeConnector
 
 _REGISTRY: dict[str, type[Connector]] = {
     "mysql": MySqlConnector,
     "clickhouse": ClickHouseConnector,
     "sqlite": SqliteConnector,
+    "postgres": PostgresConnector,
+    "oracle": OracleConnector,
+    "athena": AthenaConnector,
+    "maxcompute": MaxComputeConnector,
 }
 
 SUPPORTED_ENGINES = tuple(_REGISTRY.keys())

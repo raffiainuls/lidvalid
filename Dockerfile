@@ -1,3 +1,14 @@
+# syntax=docker/dockerfile:1
+
+# ---- frontend build (React SPA, see frontend/) ----
+FROM node:22-alpine AS frontend-build
+WORKDIR /app/frontend
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci
+COPY frontend/ ./
+RUN npm run build
+
+
 FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -18,6 +29,9 @@ RUN pip install -r requirements.txt
 COPY validation_core/ ./validation_core/
 COPY app/ ./app/
 COPY scripts/ ./scripts/
+# Built assets only (index.html + hashed JS/CSS under assets/) -- not
+# frontend/'s source or node_modules, see app/main.py's FRONTEND_DIST.
+COPY --from=frontend-build /app/frontend/dist ./frontend/dist
 
 RUN useradd --create-home --uid 1000 lidvalid \
     && mkdir -p /app/data \

@@ -48,8 +48,15 @@ def get_primary_key(conn: models.Connection, table: str) -> list[str]:
 def columns_by_table(conn: models.Connection, table_names: list[str]) -> dict[str, list[str]]:
     """Column names for several tables in ONE connection (opened once, reused
     for every table, closed once) — backs the key/chunk/date/exclude column
-    dropdowns in the table-mapping editor, where fetching per-field would
-    mean a fresh connection per table per config-detail page load.
+    dropdowns in the table-mapping editor.
+
+    Uses Connector.get_schemas_bulk (one batched metadata query per engine
+    that supports it) rather than one query per table -- real incident: a
+    99-table config took minutes to open because the old per-table loop paid
+    a full network round-trip per table over a VPN/SSH-tunneled connection.
+    Falls back to the same per-table loop only if the bulk query itself
+    blows up (e.g. a transient network blip mid-query), so a single bad
+    table still can't blank the whole page.
 
     Tables that fail to introspect (dropped table, no read privilege, ...)
     map to `[]` rather than raising, so one bad table doesn't blank the page
@@ -61,19 +68,22 @@ def columns_by_table(conn: models.Connection, table_names: list[str]) -> dict[st
     except Exception:
         return {name: [] for name in table_names}
 
-    result: dict[str, list[str]] = {}
     try:
-        for name in table_names:
-            if name in result:
-                continue
-            try:
-                df = connector.get_schema(conn.database, name)
-                result[name] = df["column_name"].tolist() if "column_name" in df.columns else []
-            except Exception:
-                result[name] = []
+        try:
+            return connector.get_schemas_bulk(conn.database, table_names)
+        except Exception:
+            result: dict[str, list[str]] = {}
+            for name in table_names:
+                if name in result:
+                    continue
+                try:
+                    df = connector.get_schema(conn.database, name)
+                    result[name] = df["column_name"].tolist() if "column_name" in df.columns else []
+                except Exception:
+                    result[name] = []
+            return result
     finally:
         connector.close()
-    return result
 
 
 def _blank_suggestion(

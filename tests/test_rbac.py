@@ -7,6 +7,12 @@ Two independent concerns, both tested here:
 2. Data scoping: Connection/ValidationConfig/Run rows are per-owner. A
    non-admin only ever sees their own rows (list views omit others', direct
    access to another owner's row 404s); admin sees everyone's.
+
+Ported to the JSON API (app/routers/api.py) when the frontend moved from
+server-rendered Jinja2 to a React SPA -- require_login_api/require_role_api
+return real 401/403 responses instead of RedirectToLogin's 303, which is a
+real improvement this suite now asserts on directly rather than following
+a redirect Location header.
 """
 from __future__ import annotations
 
@@ -32,12 +38,12 @@ def _make_app(tmp_path: Path):
     return TestClient(main_module.app), db_module, models_module, security_module
 
 
-def _create_user(db_module, models_module, security_module, email: str, role: str) -> int:
+def _create_user(db_module, models_module, security_module, username: str, role: str) -> int:
     db = db_module.SessionLocal()
     try:
         u = models_module.User(
-            email=email, password_hash=security_module.hash_password("pw12345"),
-            display_name=email, role=role,
+            username=username, password_hash=security_module.hash_password("pw12345"),
+            display_name=username, role=role,
         )
         db.add(u)
         db.commit()
@@ -47,14 +53,16 @@ def _create_user(db_module, models_module, security_module, email: str, role: st
         db.close()
 
 
-def _login(client, email: str, password: str = "pw12345"):
-    r = client.post("/login", data={"email": email, "password": password})
-    assert r.status_code in (200, 303), r.text
-    return r
+def _login(client, username: str, password: str = "pw12345") -> str:
+    """Logs in and returns the CSRF token every mutating /api call needs as
+    the X-CSRF-Token header (double-submit cookie -- see app/auth.py)."""
+    r = client.post("/api/login", json={"username": username, "password": password})
+    assert r.status_code == 200, r.text
+    return client.cookies.get("csrf_token")
 
 
 def _logout(client) -> None:
-    client.post("/logout")
+    client.post("/api/logout")
 
 
 # --------------------------------------------------------------- role gating
@@ -62,46 +70,41 @@ def test_viewer_can_read_but_not_create_or_mutate(tmp_path):
     client, db_module, models_module, security_module = _make_app(tmp_path)
     with client:
         _create_user(db_module, models_module, security_module, "viewer@x.com", "viewer")
-        _login(client, "viewer@x.com")
+        csrf = _login(client, "viewer@x.com")
 
         # viewer+ (read-only) routes: reachable
-        assert client.get("/dashboard").status_code == 200
-        assert client.get("/configs").status_code == 200
-        assert client.get("/connections").status_code == 200
+        assert client.get("/api/dashboard").status_code == 200
+        assert client.get("/api/configs").status_code == 200
+        assert client.get("/api/connections").status_code == 200
 
-        # editor+ routes: bounced to /login instead of acting (RedirectToLogin)
-        cases = [
-            ("get", "/connections/new"),
-            ("get", "/configs/new"),
-        ]
-        for method, url in cases:
-            r = getattr(client, method)(url, follow_redirects=False)
-            assert r.status_code == 303, f"{method} {url} -> {r.status_code}"
-            assert r.headers["location"].startswith("/login"), f"{method} {url} -> {r.headers['location']}"
-
-        r = client.post("/connections", data={"name": "nope", "engine": "sqlite"}, follow_redirects=False)
-        assert r.status_code == 303 and r.headers["location"].startswith("/login")
+        # editor+ routes: a viewer IS authenticated, so this is a 403
+        # (insufficient role), not a 401 (not authenticated at all).
+        r = client.post(
+            "/api/connections", json={"name": "nope", "engine": "sqlite"},
+            headers={"X-CSRF-Token": csrf},
+        )
+        assert r.status_code == 403
 
         r = client.post(
-            "/configs", data={"name": "nope", "source_connection_id": 1, "target_connection_id": 1},
-            follow_redirects=False,
+            "/api/configs",
+            json={"name": "nope", "description": "", "source_connection_id": 1, "target_connection_id": 1, "default_mode": "tiered"},
+            headers={"X-CSRF-Token": csrf},
         )
-        assert r.status_code == 303 and r.headers["location"].startswith("/login")
+        assert r.status_code == 403
 
 
 def test_editor_can_create_connection_and_config(tmp_path):
     client, db_module, models_module, security_module = _make_app(tmp_path)
     with client:
         _create_user(db_module, models_module, security_module, "editor@x.com", "editor")
-        _login(client, "editor@x.com")
+        csrf = _login(client, "editor@x.com")
 
         r = client.post(
-            "/connections",
-            data={"name": "Editor Owned DB", "engine": "sqlite", "database": "editor.sqlite"},
-            follow_redirects=False,
+            "/api/connections",
+            json={"name": "Editor Owned DB", "engine": "sqlite", "database": "editor.sqlite"},
+            headers={"X-CSRF-Token": csrf},
         )
-        assert r.status_code == 303
-        assert "ok=" in r.headers["location"]
+        assert r.status_code == 201, r.text
 
         db = db_module.SessionLocal()
         try:
@@ -112,13 +115,13 @@ def test_editor_can_create_connection_and_config(tmp_path):
             db.close()
 
 
-def test_unauthorized_tables_fragment_now_requires_login(tmp_path):
-    """Regression test: this route previously had NO auth dependency at all."""
+def test_unauthenticated_run_detail_requires_login(tmp_path):
+    """Regression test: the old fragment route this replaces previously had
+    NO auth dependency at all."""
     client, db_module, models_module, security_module = _make_app(tmp_path)
     with client:
-        r = client.get("/runs/1/tables-fragment", follow_redirects=False)
-        assert r.status_code == 303
-        assert r.headers["location"].startswith("/login")
+        r = client.get("/api/runs/1")
+        assert r.status_code == 401
 
 
 # --------------------------------------------------------------- data scoping
@@ -164,20 +167,23 @@ def test_editor_cannot_see_or_reach_another_editors_data(tmp_path):
 
         # A sees their own stuff
         _login(client, "a@x.com")
-        assert "Connection A" in client.get("/connections").text
-        assert "Config A" in client.get("/configs").text
-        assert client.get(f"/configs/{cfg_id}").status_code == 200
-        assert client.get(f"/runs/{run_id}").status_code == 200
+        names = [c["name"] for c in client.get("/api/connections").json()]
+        assert "Connection A" in names
+        cfg_names = [c["name"] for c in client.get("/api/configs").json()]
+        assert "Config A" in cfg_names
+        assert client.get(f"/api/configs/{cfg_id}").status_code == 200
+        assert client.get(f"/api/runs/{run_id}").status_code == 200
         _logout(client)
 
         # B sees NONE of it -- absent from lists, 404 on direct access
         _login(client, "b@x.com")
-        assert "Connection A" not in client.get("/connections").text
-        assert "Config A" not in client.get("/configs").text
-        assert client.get(f"/connections/{conn_id}/edit").status_code == 404
-        assert client.get(f"/configs/{cfg_id}").status_code == 404
-        assert client.get(f"/runs/{run_id}").status_code == 404
-        assert client.get(f"/api/runs/{run_id}/status").status_code == 404
+        names = [c["name"] for c in client.get("/api/connections").json()]
+        assert "Connection A" not in names
+        cfg_names = [c["name"] for c in client.get("/api/configs").json()]
+        assert "Config A" not in cfg_names
+        assert client.get(f"/api/connections/{conn_id}").status_code == 404
+        assert client.get(f"/api/configs/{cfg_id}").status_code == 404
+        assert client.get(f"/api/runs/{run_id}").status_code == 404
 
 
 def test_admin_sees_everyones_data(tmp_path):
@@ -190,9 +196,81 @@ def test_admin_sees_everyones_data(tmp_path):
         cfg_id, run_id = _seed_owned_config_and_run(db_module, models_module, a_id, conn_id, "Config A2")
 
         _login(client, "root@x.com")
-        assert "Connection A2" in client.get("/connections").text
-        assert "Config A2" in client.get("/configs").text
-        assert client.get(f"/configs/{cfg_id}").status_code == 200
-        assert client.get(f"/runs/{run_id}").status_code == 200
-        # admin can even edit another user's connection (bypass, not just view)
-        assert client.get(f"/connections/{conn_id}/edit").status_code == 200
+        names = [c["name"] for c in client.get("/api/connections").json()]
+        assert "Connection A2" in names
+        cfg_names = [c["name"] for c in client.get("/api/configs").json()]
+        assert "Config A2" in cfg_names
+        assert client.get(f"/api/configs/{cfg_id}").status_code == 200
+        assert client.get(f"/api/runs/{run_id}").status_code == 200
+        # admin can even reach another user's connection (bypass, not just view)
+        assert client.get(f"/api/connections/{conn_id}").status_code == 200
+
+
+# ------------------------------------------------------------- self-registration
+def test_self_register_creates_active_editor_and_logs_in(tmp_path):
+    client, db_module, models_module, security_module = _make_app(tmp_path)
+    with client:
+        r = client.post(
+            "/api/register",
+            json={"username": "newbie", "password": "pw123456", "display_name": "New Bie"},
+        )
+        assert r.status_code == 201, r.text
+        body = r.json()
+        assert body["username"] == "newbie"
+        assert body["role"] == "editor"
+
+        # session cookie from registration works immediately, no separate login
+        me = client.get("/api/me")
+        assert me.status_code == 200
+        assert me.json()["username"] == "newbie"
+
+        db = db_module.SessionLocal()
+        try:
+            u = db.query(models_module.User).filter_by(username="newbie").first()
+            assert u.is_active is True
+            assert u.role == "editor"
+        finally:
+            db.close()
+
+
+def test_self_register_sees_no_other_users_data(tmp_path):
+    client, db_module, models_module, security_module = _make_app(tmp_path)
+    with client:
+        other_id = _create_user(db_module, models_module, security_module, "someone_else", "editor")
+        _seed_owned_connection(db_module, models_module, other_id, "Someone Else's Connection")
+
+        r = client.post("/api/register", json={"username": "fresh_editor", "password": "pw123456"})
+        assert r.status_code == 201, r.text
+        names = [c["name"] for c in client.get("/api/connections").json()]
+        assert names == []
+
+
+def test_self_register_rejects_duplicate_username(tmp_path):
+    client, db_module, models_module, security_module = _make_app(tmp_path)
+    with client:
+        r1 = client.post("/api/register", json={"username": "dupe", "password": "pw123456"})
+        assert r1.status_code == 201
+        _logout(client)
+        r2 = client.post("/api/register", json={"username": "dupe", "password": "pw223456"})
+        assert r2.status_code == 409
+
+
+def test_self_register_rejects_short_password(tmp_path):
+    client, db_module, models_module, security_module = _make_app(tmp_path)
+    with client:
+        r = client.post("/api/register", json={"username": "shortpw", "password": "abc123"})
+        assert r.status_code == 400
+
+
+def test_self_register_cannot_choose_role(tmp_path):
+    """The request body has no `role` field at all -- passing one is just
+    ignored by Pydantic rather than accepted, so there's no way to self-grant
+    admin/viewer through this endpoint."""
+    client, db_module, models_module, security_module = _make_app(tmp_path)
+    with client:
+        r = client.post(
+            "/api/register",
+            json={"username": "sneaky", "password": "pw123456", "role": "admin"},
+        )
+        assert r.status_code == 201
+        assert r.json()["role"] == "editor"

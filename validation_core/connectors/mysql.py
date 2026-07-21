@@ -128,6 +128,22 @@ class MySqlConnector(Connector):
         df = self.query_df(q)
         return df["t"].tolist() if "t" in df.columns else []
 
+    def get_schemas_bulk(self, database: str, tables: list[str]) -> dict[str, list[str]]:
+        if not tables:
+            return {}
+        in_list = ", ".join(f"'{t}'" for t in tables)
+        q = (
+            f"SELECT TABLE_NAME AS t, COLUMN_NAME AS column_name FROM INFORMATION_SCHEMA.COLUMNS "
+            f"WHERE TABLE_SCHEMA = '{database}' AND TABLE_NAME IN ({in_list}) "
+            f"ORDER BY TABLE_NAME, ORDINAL_POSITION"
+        )
+        df = self.query_df(q)
+        result: dict[str, list[str]] = {t: [] for t in tables}
+        if "t" in df.columns:
+            for t, group in df.groupby("t"):
+                result[t] = group["column_name"].tolist()
+        return result
+
     def get_primary_key(self, database: str, table: str) -> list[str]:
         # ORDER BY ORDINAL_POSITION is what makes a composite PK come back in
         # the correct column order (e.g. (order_id, material_id), not

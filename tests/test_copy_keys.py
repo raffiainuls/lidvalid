@@ -3,6 +3,11 @@ Diffs tabs): explicit user request -- they run a manual re-insert script
 against the pipeline once they know which rows are missing/differing
 (`WHERE id IN (...)`), and needed every affected key, not just the current
 page of the (paginated) Missing Keys/Value Diffs tabs.
+
+Ported to GET /api/runs/{id}/tables/{id}/keys (still plain text) when the
+frontend moved to a React SPA -- _format_keys_for_sql/_NUMERIC_KEY_RE now
+live in app/routers/api.py (app/routers/ui.py, where they used to live, is
+gone).
 """
 from __future__ import annotations
 
@@ -11,7 +16,7 @@ from pathlib import Path
 
 from conftest import reload_app_with_fresh_db
 
-from app.routers.ui import _format_keys_for_sql
+from app.routers.api import _format_keys_for_sql
 
 
 def _make_app(tmp_path: Path):
@@ -29,8 +34,8 @@ def _make_app(tmp_path: Path):
 
 
 def _login(client):
-    r = client.post("/login", data={"email": "admin@lidvalid.local", "password": "admin123"})
-    assert r.status_code in (200, 303)
+    r = client.post("/api/login", json={"username": "admin", "password": "admin123"})
+    assert r.status_code == 200
 
 
 def _seed_table(db_module, models_module, key_columns=None):
@@ -95,11 +100,11 @@ class TestKeysEndpoint:
             finally:
                 db.close()
 
-            r = client.get(f"/runs/{run_id}/tables/{rt_id}/keys?kind=missing_in_target")
+            r = client.get(f"/api/runs/{run_id}/tables/{rt_id}/keys?kind=missing_in_target")
             assert r.status_code == 200
             assert r.text == "10,\n20,\n30"
 
-            r2 = client.get(f"/runs/{run_id}/tables/{rt_id}/keys?kind=missing_in_source")
+            r2 = client.get(f"/api/runs/{run_id}/tables/{rt_id}/keys?kind=missing_in_source")
             assert r2.text == "99"
 
     def test_value_diff_dedupes_keys_across_columns(self, tmp_path):
@@ -125,10 +130,10 @@ class TestKeysEndpoint:
             finally:
                 db.close()
 
-            r = client.get(f"/runs/{run_id}/tables/{rt_id}/keys?kind=value_diff")
+            r = client.get(f"/api/runs/{run_id}/tables/{rt_id}/keys?kind=value_diff")
             assert r.text == "1,\n2"  # deduped, not "1,\n1,\n2"
 
-            r_filtered = client.get(f"/runs/{run_id}/tables/{rt_id}/keys?kind=value_diff&column=name")
+            r_filtered = client.get(f"/api/runs/{run_id}/tables/{rt_id}/keys?kind=value_diff&column=name")
             assert r_filtered.text == "1"  # only key 1 differs on `name`
 
     def test_composite_key_table_shows_joined_value_with_header(self, tmp_path):
@@ -145,7 +150,7 @@ class TestKeysEndpoint:
             finally:
                 db.close()
 
-            r = client.get(f"/runs/{run_id}/tables/{rt_id}/keys?kind=missing_in_target")
+            r = client.get(f"/api/runs/{run_id}/tables/{rt_id}/keys?kind=missing_in_target")
             assert "order_id + material_id" in r.text
             assert "5_9" in r.text
 
@@ -154,7 +159,7 @@ class TestKeysEndpoint:
         with client:
             run_id, rt_id, _ = _seed_table(db_module, models_module)
             _login(client)
-            r = client.get(f"/runs/{run_id}/tables/{rt_id}/keys?kind=bogus")
+            r = client.get(f"/api/runs/{run_id}/tables/{rt_id}/keys?kind=bogus")
             assert r.status_code == 400
 
     def test_wrong_run_id_returns_404(self, tmp_path):
@@ -162,7 +167,7 @@ class TestKeysEndpoint:
         with client:
             run_id, rt_id, _ = _seed_table(db_module, models_module)
             _login(client)
-            r = client.get(f"/runs/{run_id + 999}/tables/{rt_id}/keys?kind=missing_in_target")
+            r = client.get(f"/api/runs/{run_id + 999}/tables/{rt_id}/keys?kind=missing_in_target")
             assert r.status_code == 404
 
     def test_no_matching_findings_returns_placeholder_not_empty_string(self, tmp_path):
@@ -170,6 +175,6 @@ class TestKeysEndpoint:
         with client:
             run_id, rt_id, _ = _seed_table(db_module, models_module)
             _login(client)
-            r = client.get(f"/runs/{run_id}/tables/{rt_id}/keys?kind=missing_in_target")
+            r = client.get(f"/api/runs/{run_id}/tables/{rt_id}/keys?kind=missing_in_target")
             assert r.status_code == 200
             assert "tidak ada key" in r.text.lower()

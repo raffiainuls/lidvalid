@@ -8,6 +8,12 @@ page for a table with ~20k diffs took minutes to respond. Fixed by querying
 only COUNTs/GROUP BY aggregates for badges, and paginating (200 rows/page) the
 actual row fetch for whichever tab is currently being viewed.
 
+Ported to GET /api/runs/{id}/tables/{id} (core fields + counts only, no
+rowlevel rows) and GET /api/runs/{id}/tables/{id}/rowlevel (paginated actual
+rows) when the frontend moved to a React SPA -- same split the perf fix
+already established, just exposed as two JSON endpoints instead of one HTML
+page with server-side tabs.
+
 These tests build enough findings to span multiple pages (250 > 200 page
 size) and assert the route only returns one page's worth of rows at a time,
 with the right totals/pagination metadata.
@@ -65,76 +71,89 @@ def _seed_run_table(db_module, models_module, n_diffs: int, n_missing: int, name
 
 
 def _login(client):
-    r = client.post("/login", data={"email": "admin@lidvalid.local", "password": "admin123"})
-    assert r.status_code in (200, 303)
+    r = client.post("/api/login", json={"username": "admin", "password": "admin123"})
+    assert r.status_code == 200
 
 
-def test_diffs_tab_is_paginated_not_loaded_in_full(tmp_path):
+def test_diffs_rowlevel_is_paginated_not_loaded_in_full(tmp_path):
     client, db_module, models_module = _make_app(tmp_path)
     with client:
         run_id, rt_id = _seed_run_table(db_module, models_module, n_diffs=250, n_missing=0)
         _login(client)
 
-        r1 = client.get(f"/runs/{run_id}/tables/{rt_id}?tab=diffs&page=1")
+        core = client.get(f"/api/runs/{run_id}/tables/{rt_id}")
+        assert core.status_code == 200
+        assert core.json()["total_diff_count"] == 250
+
+        r1 = client.get(f"/api/runs/{run_id}/tables/{rt_id}/rowlevel?type=diffs&page=1")
         assert r1.status_code == 200
-        assert "key_0000" in r1.text and "key_0199" in r1.text
-        assert "key_0200" not in r1.text  # page 2 content must not leak into page 1
-        assert "Value Diffs (250)" in r1.text
-        assert "Halaman 1 / 2" in r1.text
+        d1 = r1.json()
+        keys1 = {row["row_key"] for row in d1["rows"]}
+        assert "key_0000" in keys1 and "key_0199" in keys1
+        assert "key_0200" not in keys1  # page 2 content must not leak into page 1
+        assert d1["page"] == 1 and d1["total_pages"] == 2
 
-        r2 = client.get(f"/runs/{run_id}/tables/{rt_id}?tab=diffs&page=2")
+        r2 = client.get(f"/api/runs/{run_id}/tables/{rt_id}/rowlevel?type=diffs&page=2")
         assert r2.status_code == 200
-        assert "key_0200" in r2.text and "key_0249" in r2.text
-        assert "key_0000" not in r2.text
-        assert "Halaman 2 / 2" in r2.text
+        d2 = r2.json()
+        keys2 = {row["row_key"] for row in d2["rows"]}
+        assert "key_0200" in keys2 and "key_0249" in keys2
+        assert "key_0000" not in keys2
+        assert d2["page"] == 2 and d2["total_pages"] == 2
 
 
-def test_diffs_tab_column_filter_combines_with_pagination(tmp_path):
+def test_diffs_rowlevel_column_filter_combines_with_pagination(tmp_path):
     client, db_module, models_module = _make_app(tmp_path)
     with client:
         run_id, rt_id = _seed_run_table(db_module, models_module, n_diffs=250, n_missing=0)
         _login(client)
 
         # even indices -> "amount" (125 rows), odd -> "name" (125 rows)
-        r = client.get(f"/runs/{run_id}/tables/{rt_id}?tab=diffs&column=amount&page=1")
+        r = client.get(f"/api/runs/{run_id}/tables/{rt_id}/rowlevel?type=diffs&column=amount&page=1")
         assert r.status_code == 200
-        assert "key_0000" in r.text  # amount, index 0
-        assert "key_0001" not in r.text  # name, filtered out
-        assert "key_0248" in r.text  # last "amount" row -- all 125 fit on one page
-        assert "Halaman" not in r.text  # pager hides itself when everything fits on page 1
+        data = r.json()
+        keys = {row["row_key"] for row in data["rows"]}
+        assert "key_0000" in keys  # amount, index 0
+        assert "key_0001" not in keys  # name, filtered out
+        assert "key_0248" in keys  # last "amount" row -- all 125 fit on one page
+        assert data["total_pages"] == 1  # everything fits on page 1
 
 
-def test_missing_tab_is_paginated(tmp_path):
+def test_missing_rowlevel_is_paginated(tmp_path):
     client, db_module, models_module = _make_app(tmp_path)
     with client:
         run_id, rt_id = _seed_run_table(db_module, models_module, n_diffs=0, n_missing=210)
         _login(client)
 
-        r1 = client.get(f"/runs/{run_id}/tables/{rt_id}?tab=missing&page=1")
+        core = client.get(f"/api/runs/{run_id}/tables/{rt_id}")
+        assert core.json()["missing_count"] == 210
+
+        r1 = client.get(f"/api/runs/{run_id}/tables/{rt_id}/rowlevel?type=missing&page=1")
         assert r1.status_code == 200
-        assert "mk_0000" in r1.text and "mk_0199" in r1.text
-        assert "mk_0200" not in r1.text
-        assert "Missing Keys (210)" in r1.text
+        keys1 = {row["row_key"] for row in r1.json()["rows"]}
+        assert "mk_0000" in keys1 and "mk_0199" in keys1
+        assert "mk_0200" not in keys1
 
-        r2 = client.get(f"/runs/{run_id}/tables/{rt_id}?tab=missing&page=2")
-        assert "mk_0200" in r2.text and "mk_0209" in r2.text
+        r2 = client.get(f"/api/runs/{run_id}/tables/{rt_id}/rowlevel?type=missing&page=2")
+        keys2 = {row["row_key"] for row in r2.json()["rows"]}
+        assert "mk_0200" in keys2 and "mk_0209" in keys2
 
 
-def test_ringkasan_tab_does_not_touch_rowlevel_findings_at_all(tmp_path):
-    """The summary tab reads rt.rl_metrics (a precomputed JSON blob), never
-    the findings tables -- opening it on a heavily-mismatched table shouldn't
-    pull any rowlevel rows at all."""
+def test_core_endpoint_does_not_return_rowlevel_findings_at_all(tmp_path):
+    """The core drilldown endpoint reads counts/aggregates only, never the
+    findings themselves -- fetching a heavily-mismatched table's summary
+    shouldn't pull any rowlevel rows into the response at all."""
     client, db_module, models_module = _make_app(tmp_path)
     with client:
         run_id, rt_id = _seed_run_table(db_module, models_module, n_diffs=250, n_missing=210)
         _login(client)
-        r = client.get(f"/runs/{run_id}/tables/{rt_id}?tab=ringkasan")
+        r = client.get(f"/api/runs/{run_id}/tables/{rt_id}")
         assert r.status_code == 200
         assert "key_0000" not in r.text
         assert "mk_0000" not in r.text
 
 
-def test_tipekolom_tab_shows_schema_comparison_and_flags_category_mismatch(tmp_path):
+def test_tipekolom_shows_schema_comparison_and_flags_category_mismatch(tmp_path):
     client, db_module, models_module = _make_app(tmp_path)
     with client:
         run_id, rt_id = _seed_run_table(db_module, models_module, n_diffs=0, n_missing=0)
@@ -152,28 +171,31 @@ def test_tipekolom_tab_shows_schema_comparison_and_flags_category_mismatch(tmp_p
         finally:
             db.close()
 
-        r = client.get(f"/runs/{run_id}/tables/{rt_id}?tab=tipekolom")
+        r = client.get(f"/api/runs/{run_id}/tables/{rt_id}")
         assert r.status_code == 200
-        assert "Tipe Kolom (1)" in r.text  # nav badge counts only the 1 real mismatch
-        assert "id" in r.text and "int" in r.text and "Int64" in r.text
-        assert "amount" in r.text and "decimal" in r.text and "String" in r.text
-        assert "beda kategori" in r.text
-        assert "legacy_only" in r.text
+        data = r.json()
+        assert data["type_mismatch_count"] == 1  # counts only the 1 real mismatch
+        by_col = {c["column"]: c for c in data["column_type_details"]}
+        assert by_col["id"] == {"column": "id", "source_type": "int", "target_type": "Int64", "category_match": True}
+        assert by_col["amount"]["category_match"] is False
+        assert by_col["legacy_only"]["category_match"] is None
 
         # a fresh table with no column_type_details yet (e.g. an old run,
         # or one that never reached Report 3) must render without crashing
         run_id2, rt_id2 = _seed_run_table(db_module, models_module, n_diffs=0, n_missing=0, name_suffix="2")
-        r2 = client.get(f"/runs/{run_id2}/tables/{rt_id2}?tab=tipekolom")
+        r2 = client.get(f"/api/runs/{run_id2}/tables/{rt_id2}")
         assert r2.status_code == 200
-        assert "Tipe Kolom (" not in r2.text  # no count badge when there's nothing to flag
-        assert "Belum ada data tipe kolom" in r2.text
+        data2 = r2.json()
+        assert data2["type_mismatch_count"] == 0
+        assert data2["column_type_details"] == []
 
 
-def test_periode_tab_shows_metric_detail_for_zero_delta_periods(tmp_path):
+def test_periode_shows_metric_detail_for_zero_delta_periods(tmp_path):
     """Real user confusion: periods with Δ=0 (row counts identical) still
-    appeared in the mismatch list with no visible reason. The tab must show
-    WHICH column/metric differed for those, and the nav badge must count
-    distinct mismatched PERIODS, not the (now larger) number of finding rows."""
+    appeared in the mismatch list with no visible reason. The response must
+    carry WHICH column/metric differed for those, and period_count must
+    count distinct mismatched PERIODS, not the (now larger) number of
+    finding rows."""
     client, db_module, models_module = _make_app(tmp_path)
     with client:
         run_id, rt_id = _seed_run_table(db_module, models_module, n_diffs=0, n_missing=0)
@@ -201,10 +223,14 @@ def test_periode_tab_shows_metric_detail_for_zero_delta_periods(tmp_path):
         finally:
             db.close()
 
-        r = client.get(f"/runs/{run_id}/tables/{rt_id}?tab=periode")
+        r = client.get(f"/api/runs/{run_id}/tables/{rt_id}")
         assert r.status_code == 200
-        assert "Periode (2)" in r.text  # 2 distinct periods, not 3 findings
-        assert "2025-05" in r.text and "2025-11" in r.text
-        assert "amount" in r.text and "sum" in r.text and "max" in r.text
-        assert "row count" in r.text  # the plain row-count finding for 2025-11
-        assert "1700000.0" in r.text and "2599999.0" in r.text
+        data = r.json()
+        assert data["period_count"] == 2  # 2 distinct periods, not 3 findings
+        periods = {f["period"] for f in data["period_findings"]}
+        assert periods == {"2025-05", "2025-11"}
+        metrics = {(f["period"], f["metric"]) for f in data["period_findings"]}
+        assert ("2025-05", "sum") in metrics and ("2025-05", "max") in metrics
+        row_count_finding = next(f for f in data["period_findings"] if f["period"] == "2025-11")
+        assert row_count_finding["metric"] is None and row_count_finding["column_name"] is None
+        assert row_count_finding["source_value"] == "16" and row_count_finding["target_value"] == "15"

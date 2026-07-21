@@ -5,6 +5,9 @@ per-table re-run) creates a NEW Run containing only the re-run tables, so
 no single run shows where every table stands -- users had to mentally merge
 several partial runs. The status page shows, per table: latest status
 across ALL runs + a run-by-run history, with a re-run button per row.
+
+Ported to GET /api/configs/{id}/status and POST /api/configs/{id}/rerun-table
+(JSON) when the frontend moved to a React SPA.
 """
 from __future__ import annotations
 
@@ -60,9 +63,10 @@ def _seed(db_module, models_module):
         db.close()
 
 
-def _login(client):
-    r = client.post("/login", data={"email": "admin@lidvalid.local", "password": "admin123"})
-    assert r.status_code in (200, 303)
+def _login(client) -> str:
+    r = client.post("/api/login", json={"username": "admin", "password": "admin123"})
+    assert r.status_code == 200
+    return client.cookies.get("csrf_token")
 
 
 def test_status_page_merges_latest_state_across_partial_runs(tmp_path):
@@ -71,35 +75,44 @@ def test_status_page_merges_latest_state_across_partial_runs(tmp_path):
         cfg_id, run1_id, run2_id = _seed(db_module, models_module)
         _login(client)
 
-        r = client.get(f"/configs/{cfg_id}/status")
+        r = client.get(f"/api/configs/{cfg_id}/status")
         assert r.status_code == 200
+        data = r.json()
+        rows_by_table = {row["source_table"]: row for row in data["rows"]}
+
         # table a: latest = PASS from run 2 (the partial re-run), history has both runs
-        assert f"/runs/{run2_id}/tables/" in r.text
+        assert rows_by_table["a"]["latest"]["run_id"] == run2_id
+        assert rows_by_table["a"]["latest"]["status"] == "pass"
+        assert {h["run_id"] for h in rows_by_table["a"]["history"]} == {run1_id, run2_id}
         # table b: latest = PASS from run 1 (untouched by the partial re-run)
-        assert f"/runs/{run1_id}/tables/" in r.text
-        # no ROW is in the never-ran state (the KPI card label legitimately
-        # contains the same phrase, so match the row-specific markup)
-        assert '<span class="subtle">belum pernah run</span>' not in r.text
-        # history chips: run1's FAIL for table a must still be visible
-        assert "FAIL" in r.text
+        assert rows_by_table["b"]["latest"]["run_id"] == run1_id
+        assert rows_by_table["b"]["latest"]["status"] == "pass"
+        # no row is in the never-ran state
+        assert all(row["latest"] is not None for row in data["rows"])
+        # history for table a must still show run1's FAIL
+        run1_entry = next(h for h in rows_by_table["a"]["history"] if h["run_id"] == run1_id)
+        assert run1_entry["status"] == "fail"
 
 
-def test_per_table_rerun_creates_single_table_run_and_returns_to_status(tmp_path, monkeypatch):
+def test_per_table_rerun_creates_single_table_run_and_returns_run_id(tmp_path, monkeypatch):
     client, db_module, models_module = _make_app(tmp_path)
     with client:
         cfg_id, _r1, _r2 = _seed(db_module, models_module)
-        _login(client)
+        csrf = _login(client)
 
         from app.services import run_service
         monkeypatch.setattr(run_service, "start_run_async", lambda run_id: None)
 
-        r = client.post(f"/configs/{cfg_id}/rerun-table", data={"source_table": "a"}, follow_redirects=False)
-        assert r.status_code == 303
-        assert f"/configs/{cfg_id}/status" in r.headers["location"]  # back to the matrix, not the 1-table run
+        r = client.post(
+            f"/api/configs/{cfg_id}/rerun-table", json={"source_table": "a"},
+            headers={"X-CSRF-Token": csrf},
+        )
+        assert r.status_code == 200
+        new_run_id = r.json()["run_id"]
 
         db = db_module.SessionLocal()
         try:
-            new_run = db.query(models_module.Run).order_by(models_module.Run.id.desc()).first()
+            new_run = db.get(models_module.Run, new_run_id)
             assert new_run.table_filter == ["a"]
             assert new_run.trigger_type == "revalidate"
             names = [rt.source_table for rt in new_run.tables]
@@ -112,7 +125,7 @@ def test_per_table_rerun_rejects_unknown_table(tmp_path, monkeypatch):
     client, db_module, models_module = _make_app(tmp_path)
     with client:
         cfg_id, _r1, _r2 = _seed(db_module, models_module)
-        _login(client)
+        csrf = _login(client)
 
         from app.services import run_service
         monkeypatch.setattr(run_service, "start_run_async", lambda run_id: None)
@@ -123,9 +136,11 @@ def test_per_table_rerun_rejects_unknown_table(tmp_path, monkeypatch):
         finally:
             db.close()
 
-        r = client.post(f"/configs/{cfg_id}/rerun-table", data={"source_table": "nope"}, follow_redirects=False)
-        assert r.status_code == 303
-        assert "error=" in r.headers["location"]
+        r = client.post(
+            f"/api/configs/{cfg_id}/rerun-table", json={"source_table": "nope"},
+            headers={"X-CSRF-Token": csrf},
+        )
+        assert r.status_code == 400
 
         db = db_module.SessionLocal()
         try:

@@ -4,17 +4,21 @@ import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 
 from .database import init_db, SessionLocal
-from .routers import ui, api
-from .auth import RedirectToLogin, redirect_to_login_handler
+from .routers import api
 from .services import run_service
 from . import security, models
 
 BASE_DIR = Path(__file__).resolve().parent
+# The React SPA's production build (see frontend/README or the root
+# README's Deployment section) -- built by the Dockerfile's Node stage,
+# or locally via `cd frontend && npm run build` for a non-Docker run.
+FRONTEND_DIST = BASE_DIR.parent / "frontend" / "dist"
 
 
 def _bootstrap_admin() -> None:
@@ -22,19 +26,19 @@ def _bootstrap_admin() -> None:
     db = SessionLocal()
     try:
         if db.query(models.User).count() == 0:
-            email = os.environ.get("LIDVALID_ADMIN_EMAIL")
+            username = os.environ.get("LIDVALID_ADMIN_USERNAME")
             password = os.environ.get("LIDVALID_ADMIN_PASSWORD")
-            if not email or not password:
+            if not username or not password:
                 if os.environ.get("LIDVALID_ENV", "development") == "production":
                     raise RuntimeError(
-                        "LIDVALID_ADMIN_EMAIL and LIDVALID_ADMIN_PASSWORD must be set "
+                        "LIDVALID_ADMIN_USERNAME and LIDVALID_ADMIN_PASSWORD must be set "
                         "for first-run bootstrap when LIDVALID_ENV=production."
                     )
-                email = email or "admin@lidvalid.local"
+                username = username or "admin"
                 password = password or "admin123"
                 print("WARNING: bootstrapping with DEV-ONLY demo admin credentials.")
             admin = models.User(
-                email=email,
+                username=username,
                 password_hash=security.hash_password(password),
                 display_name="Admin",
                 role="admin",
@@ -43,8 +47,8 @@ def _bootstrap_admin() -> None:
             db.commit()
             print("=" * 60)
             print("LidValid — first run: created bootstrap admin user")
-            print(f"  email:    {email}")
-            if email == "admin@lidvalid.local":
+            print(f"  username: {username}")
+            if username == "admin":
                 print("  password: admin123  (change this in Settings)")
             print("=" * 60)
 
@@ -72,8 +76,42 @@ app = FastAPI(
     lifespan=lifespan,
 )
 app.add_middleware(SessionMiddleware, secret_key=security._load_or_create_key().decode("ascii"))
-app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
-app.add_exception_handler(RedirectToLogin, redirect_to_login_handler)
-
-app.include_router(ui.router)
 app.include_router(api.router, prefix="/api")
+
+# Vite's hashed bundle filenames (index-<hash>.js/css) live under dist/assets
+# and are safe to cache forever; mounted directly if the frontend has been
+# built (skipped otherwise so importing this module -- e.g. under pytest --
+# doesn't require a Node build to exist).
+if (FRONTEND_DIST / "assets").is_dir():
+    app.mount("/assets", StaticFiles(directory=str(FRONTEND_DIST / "assets")), name="spa-assets")
+
+
+@app.api_route("/api/{full_path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
+async def api_not_found(full_path: str):
+    """A real 404 for any /api/* path no route above matched -- registered
+    before the SPA catch-all below so an unmatched API path doesn't
+    silently fall through to it and return index.html with a 200."""
+    raise HTTPException(status_code=404, detail="Not Found")
+
+
+@app.get("/{full_path:path}")
+async def spa_fallback(full_path: str):
+    """Client-side routing fallback: any path that isn't `/api/*` or a real
+    built file (favicon.svg, etc.) gets index.html, and React Router takes
+    it from there. Must be the LAST route registered -- `/api/*` and
+    `/assets/*` above need to win first, since Starlette matches path
+    templates in registration order and this `{full_path:path}` would
+    otherwise swallow everything."""
+    if not FRONTEND_DIST.is_dir():
+        return PlainTextResponse(
+            "Frontend build not found. Run `cd frontend && npm run build` "
+            "(or `npm run dev` there for local development against this API).",
+            status_code=503,
+        )
+    requested = FRONTEND_DIST / full_path
+    if full_path and requested.is_file():
+        return FileResponse(requested)
+    index = FRONTEND_DIST / "index.html"
+    if index.is_file():
+        return FileResponse(index)
+    return PlainTextResponse("Frontend build not found.", status_code=503)

@@ -102,14 +102,14 @@ def main() -> None:
         admin = db.query(models.User).filter_by(role="admin").order_by(models.User.id).first()
         if not admin:
             admin = models.User(
-                email="admin@lidvalid.local",
+                username="admin",
                 password_hash=security.hash_password("admin123"),
                 display_name="Admin", role="admin",
             )
             db.add(admin)
             db.commit()
             db.refresh(admin)
-            print("Bootstrap admin created: admin@lidvalid.local / admin123")
+            print("Bootstrap admin created: admin / admin123")
 
         source_conn = db.query(models.Connection).filter_by(name="Demo Source (contoh)").first()
         if not source_conn:

@@ -51,6 +51,10 @@ def decrypt_secret(ciphertext: bytes | None) -> str:
     return _fernet.decrypt(ciphertext).decode("utf-8")
 
 
+def generate_csrf_token() -> str:
+    return secrets.token_urlsafe(32)
+
+
 # ---- password hashing (PBKDF2-HMAC-SHA256, stdlib only) ----
 
 _ITERATIONS = 260_000

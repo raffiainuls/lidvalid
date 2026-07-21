@@ -29,6 +29,10 @@ python -m venv .venv
 # creates 2 sample SQLite databases + a config + 1 complete run, ready to view
 .venv\Scripts\python.exe scripts\seed_demo.py
 
+# build the React frontend once (creates frontend/dist -- app/main.py serves
+# it and falls back to a clear error message if this step is skipped)
+cd frontend && npm ci && npm run build && cd ..
+
 # run the server
 .venv\Scripts\uvicorn app.main:app --reload
 ```
@@ -37,6 +41,10 @@ Open **http://127.0.0.1:8000** → log in with `admin@lidvalid.local` / `admin12
 the console on first run). Config **"Demo: Contoh Validasi"** already has 1 completed run —
 `ws_materials` PASSES, `ws_orders` FAILS (5 rows deliberately dropped + 2 value diffs) with full
 drilldown to the exact row & column that differ.
+
+For active frontend development (hot reload instead of rebuilding on every change), run
+`npm run dev` in `frontend/` instead of the build step above — Vite's dev server proxies `/api`
+calls to the FastAPI backend (see `frontend/vite.config.ts`), so keep `uvicorn` running alongside it.
 
 To validate **real** data (actual MySQL/ClickHouse): create a new Connection at `/connections` with
 engine `mysql`/`clickhouse`, then create a Config as usual. The server needs the same network
@@ -51,12 +59,14 @@ To deploy to a server/VPS (Docker + Caddy + automatic HTTPS), see the **Deployme
 .venv\Scripts\python.exe -m pytest -v
 ```
 
-155 tests, all against local SQLite (no real MySQL/ClickHouse needed) — covering cross-engine
+147 tests, all against local SQLite (no real MySQL/ClickHouse needed) — covering cross-engine
 edge cases ported from both legacy tools (see `tests/test_categories.py`,
 `tests/test_rowlevel_comparator.py`, `tests/test_aggregate_validator.py`, `tests/test_tiered_runner.py`),
 a regression test (`tests/test_app_run_service.py`) for a real threading bug found while building
 this (see notes below), and `tests/test_rbac.py` for role gating + per-user data scoping (see the
-"RBAC & Data Scoping" section below).
+"RBAC & Data Scoping" section below). All HTTP-level tests hit the JSON API (`app/routers/api.py`)
+via `httpx`/`TestClient` — there's no browser/React test harness here; the frontend's own build
+(`npm run build` under `frontend/`, type-checked via `tsc`) is the check for that half of the stack.
 
 ## Structure
 
@@ -73,22 +83,28 @@ lidvalid/
 │   ├── rowlevel/           # compare_chunk_multi + RowLevelValidator — port of chunked-by-id
 │   ├── runner/             # run_table() — Tiered Validation (aggregate → rowlevel for FAILs) + retry
 │   └── excel_export.py     # exports .xlsx compatible with the old format (transition feature, not the main output)
-├── app/                  # FastAPI backend + server-rendered UI
-│   ├── main.py             # entry point, admin bootstrap (env-driven in production)
-│   ├── database.py         # SQLAlchemy engine/session (SQLite by default)
-│   ├── models.py           # ORM (13 tables + owner_id per-user scoping, SQLite-friendly version of data-model.md)
+├── app/                  # FastAPI backend -- JSON API only, serves the built React SPA as static files
+│   ├── main.py             # entry point, admin bootstrap (env-driven in production), SPA static/fallback routes
+│   ├── database.py         # SQLAlchemy engine/session (SQLite by default, Postgres via DATABASE_URL)
+│   ├── models.py           # ORM (13 tables + owner_id per-user scoping)
 │   ├── security.py         # Fernet encryption + password hashing (env var required in production)
-│   ├── auth.py             # session auth, RBAC (require_role) + data scoping (scope_query/check_owner)
-│   ├── services/           # connections/discovery/run/export services — bridge ORM ↔ validation_core
-│   ├── routers/            # ui.py (pages + form POSTs), api.py (JSON polling) — every route is RBAC-gated
-│   └── templates/          # Jinja2 — dashboard, connections, configs, run detail/report, drilldown
-├── tests/                # pytest — 155 tests, all run locally against SQLite, no real DB needed
+│   ├── auth.py             # session auth + CSRF (require_login_api/require_role_api) + data scoping (scope_query/check_owner)
+│   ├── services/           # connections/discovery/run/export/dashboard services — bridge ORM ↔ validation_core
+│   └── routers/            # api.py — the entire HTTP surface, every route RBAC-gated
+├── frontend/             # React SPA (Vite + TypeScript + Tailwind + shadcn/ui + Radix)
+│   ├── src/pages/           # one file per route (dashboard, connections, configs, run detail/drilldown, ...)
+│   ├── src/components/      # shadcn/ui primitives (src/components/ui) + app-specific components
+│   ├── src/hooks/           # TanStack Query hooks per resource (use-configs.ts, use-runs.ts, ...)
+│   ├── src/lib/             # api.ts (fetch wrapper + CSRF), types.ts (API response shapes)
+│   └── dist/                # `npm run build` output — served by app/main.py, not committed to git
+├── tests/                # pytest — 147 tests, all run locally against SQLite, no real DB needed
 │   └── test_rbac.py        # role gating + per-user data scoping
 ├── scripts/
 │   ├── seed_demo.py         # one-click end-to-end demo generator
-│   └── create_user.py       # create/update accounts (no user-management UI yet)
-├── Dockerfile / .dockerignore
-├── docker-compose.yml     # app + Caddy (auto-HTTPS)
+│   ├── create_user.py       # create/update accounts (no user-management UI yet)
+│   └── migrate_to_postgres.py  # one-time SQLite → Postgres data migration
+├── Dockerfile / .dockerignore   # multi-stage: Node builds frontend/dist, then the Python image
+├── docker-compose.yml     # app + Postgres + Caddy (auto-HTTPS)
 ├── Caddyfile
 └── .env.example           # production env var template
 ```
@@ -595,7 +611,12 @@ query string `?v={{ asset_version }}` — `asset_version` is a Jinja *global* (s
 changes, given there's no hot-reload in this app), its mtime changes, the stylesheet URL changes —
 any old cached copy in any browser becomes irrelevant since it's never requested again under that old
 URL. No manual version bump needed, doesn't depend on the user remembering to hard-refresh.
-Regression test: `tests/test_asset_versioning.py`.
+
+(Superseded by the React rewrite: Vite's production build already names every bundle
+`<name>-<contenthash>.js`/`.css` under `frontend/dist/assets/`, so a changed file always gets a new
+URL by construction — the same problem, solved by the build tool instead of a hand-rolled Jinja
+global. `tests/test_asset_versioning.py`, which covered the old mechanism, was removed along with
+`app/static/app.css` and `ui.py`.)
 
 ## RBAC & Data Scoping
 
@@ -608,17 +629,27 @@ in TECHNICAL.md §9, local-only):
 - **admin** — can view & manage EVERY user's data (bypasses ownership). No route is purely
   "admin-only" — the distinction is DATA visibility scope, not which actions are available.
 
-There's no "Manage Users" page in the UI yet — create/update accounts (including changing role or
-resetting a password) via the CLI:
+Admins get a "Users" page in the app (create accounts, change role, reset password, deactivate).
+Accounts can also be created/updated via the CLI, e.g. for first-run bootstrap or scripting:
 ```powershell
-.venv\Scripts\python.exe scripts\create_user.py --email a@b.com --password secret --role editor --name "Jane Doe"
+.venv\Scripts\python.exe scripts\create_user.py --username jane --password secret --role editor --name "Jane Doe"
 ```
+
+Anyone can also self-register from the login page (`POST /api/register`) — the account activates
+immediately as **editor**, with zero visibility into any other user's data until it creates its own
+Connections/Configs. It can never self-grant admin or viewer; only an existing admin changes roles,
+from the Users page.
+
+Login is by **username + password** (not email).
 
 ## Deployment
 
-Docker Compose (`app` + `caddy`) — see TECHNICAL.md §10 (local-only) for full architectural detail
-and two networking gotchas that were found (`host.docker.internal` pointing at the wrong gateway,
-UFW blocking container→host traffic). Summary:
+Docker Compose (`app` + `postgres` + `caddy`) — see TECHNICAL.md §10 (local-only) for full
+architectural detail and two networking gotchas that were found (`host.docker.internal` pointing at
+the wrong gateway, UFW blocking container→host traffic). The `app` image build is multi-stage: a
+`node:22-alpine` stage runs `npm ci && npm run build` for `frontend/`, then the Python stage copies
+in just the built `frontend/dist` (not the frontend's source or `node_modules`) — no separate
+frontend deploy step needed. Summary:
 
 ```powershell
 # on the server/VPS, after cloning/copying the repo there:
@@ -647,10 +678,10 @@ several decisions were adjusted so this project could be tried immediately with 
 
 | Target architecture | This implementation | Why | How to upgrade later |
 |---|---|---|---|
-| PostgreSQL | **SQLite** (default) | Zero setup, just `pip install` | `DATABASE_URL` env var → a Postgres connection string; the SQLAlchemy schema is already portable (JSON type, etc.) |
+| PostgreSQL | **Done** — Postgres in Docker Compose, migrated from the original SQLite install via `scripts/migrate_to_postgres.py` | Local dev/demo (`scripts/seed_demo.py`) still defaults to zero-setup SQLite via `DATABASE_URL` | — |
 | Celery + Redis worker | in-process **`threading.Thread` + `ThreadPoolExecutor`** | Redis/Celery need a separate service, hard to install offline easily in the original session | Swap `run_service.start_run_async` for a Celery `.delay()` task; event/progress structure is already isolated in `events_bus.py` to make swapping to Redis pub/sub easy |
-| React SPA | **Server-rendered Jinja2 + vanilla JS** (fetch polling, no framework) | No Node/npm for a build step | The UI is already cleanly separated from the engine (routers only call services); can be rebuilt as an SPA calling the same JSON endpoints in the same pattern as `/api/runs/{id}/status` |
-| SSE for live progress | **Polling `fetch()` every 2 seconds** | Simpler & more robust without needing cross-process Redis pub/sub | `events_bus.py` is already an in-memory pub/sub — just wrap it in a `StreamingResponse` SSE if wanted |
+| React SPA | **Done** — Vite + TypeScript + Tailwind + shadcn/ui + Radix, under `frontend/`; `app/routers/api.py` is now the only HTTP interface (the old server-rendered Jinja2 UI was removed) | Originally deferred (no Node/npm in that session); added once Node was available | — |
+| SSE for live progress | **Polling `fetch()` every 2 seconds** (now via TanStack Query's `refetchInterval` in the SPA) | Simpler & more robust without needing cross-process Redis pub/sub | `events_bus.py` is already an in-memory pub/sub — just wrap it in a `StreamingResponse` SSE if wanted |
 | "All columns" drilldown (match + mismatch) | **Only findings/mismatches** are stored & shown | Lighter on the DB, and more focused on "what's wrong" — but genuinely not a full comparison table like the old Excel | Add a JSON column on `RunTable` to store the full `column_details`/`src_type_details` if ever needed |
 | Import legacy YAML config | **Not implemented** | Out of scope for the original session | `validation_core.models.TableSpec` already has the exact semantics — just needs a YAML → `ConfigTable` rows parser |
 | Full RBAC (admin/editor/viewer enforced on every endpoint) | **Implemented (2026-07-21)** — see "RBAC & Data Scoping" above | Originally deferred to focus time on the engine + core flow; added when migrating to a shared production VPS | Done — no further upgrade needed for the current scope |

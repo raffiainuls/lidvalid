@@ -54,8 +54,8 @@ def test_concurrent_multi_table_run_does_not_corrupt_via_shared_session(tmp_path
     with client:
         src_path, tgt_path = _build_pair(tmp_path, n_tables=4)
 
-        r = client.post("/login", data={"email": "admin@lidvalid.local", "password": "admin123"})
-        assert r.status_code in (200, 303)
+        r = client.post("/api/login", json={"username": "admin", "password": "admin123"})
+        assert r.status_code == 200
 
         from app import models
 

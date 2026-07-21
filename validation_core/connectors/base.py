@@ -157,6 +157,24 @@ class Connector(ABC):
     def list_tables(self, database: str) -> list[str]:
         ...
 
+    def get_schemas_bulk(self, database: str, tables: list[str]) -> dict[str, list[str]]:
+        """{table_name: [column_name, ...]} for MULTIPLE tables in as few
+        round-trips as possible -- backs the config-detail page's per-table
+        column dropdowns. Default falls back to one get_schema() call per
+        table (correct, but O(n) round-trips -- real incident: a 99-table
+        config took minutes to open because of exactly this, each table's
+        query paying its own network round-trip over a VPN/SSH-tunneled
+        connection). Override this per-engine wherever the metadata store
+        supports a single `WHERE table_name IN (...)`-style query instead
+        (see MySqlConnector/PostgresConnector/etc.)."""
+        result: dict[str, list[str]] = {}
+        for t in tables:
+            if t in result:
+                continue
+            df = self.get_schema(database, t)
+            result[t] = df["column_name"].tolist() if "column_name" in df.columns else []
+        return result
+
     def get_primary_key(self, database: str, table: str) -> list[str]:
         """Best-effort discovery of the table's natural key (PRIMARY KEY for
         MySQL, sorting key for ClickHouse) — used to auto-fill `key_columns`
