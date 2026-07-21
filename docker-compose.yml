@@ -1,0 +1,36 @@
+services:
+  app:
+    build: .
+    container_name: lidvalid_app
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - LIDVALID_ENV=production
+    volumes:
+      - ./data:/app/data
+    networks:
+      - internal
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: lidvalid_caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - internal
+    depends_on:
+      - app
+
+networks:
+  internal:
+    driver: bridge
+
+volumes:
+  caddy_data:
+  caddy_config:

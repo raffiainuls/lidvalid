@@ -1,0 +1,8 @@
+{
+    email raffi.ainul@badr-interactive.com
+}
+
+43.134.129.64.sslip.io {
+    reverse_proxy app:8000
+    encode gzip
+}
