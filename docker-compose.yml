@@ -10,6 +10,16 @@ services:
       - ./data:/app/data
     networks:
       - internal
+    # Lets the app container reach services bound to the VPS HOST's
+    # localhost (e.g. an `ssh -R 8123:...` reverse tunnel opened from a
+    # laptop) via the hostname `host.docker.internal` -- a container's own
+    # localhost is NOT the host's. Only relevant when a Connection is
+    # pointed at host.docker.internal (the SSH-reverse-tunnel path); once a
+    # dedicated OpenVPN client runs directly on the VPS host instead,
+    # Connections switch to the real private hostnames and this is unused
+    # (harmless to leave in either way).
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
   caddy:
     image: caddy:2-alpine
