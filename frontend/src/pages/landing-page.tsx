@@ -96,17 +96,20 @@ const LAYERS = [
       {
         icon: Rows3,
         title: "Struktur Tabel & Tipe Data",
-        desc: "Bandingkan jumlah baris, jumlah kolom, dan tipe data tiap kolom antara source & target — termasuk mendeteksi kolom yang cuma ada di salah satu sisi. Kolom yang beda kategori tipe otomatis dilewati dari validasi statistik berikutnya, supaya tidak jadi alarm palsu.",
+        desc: "Bandingkan bentuk tabelnya dulu, sebelum masuk ke isinya.",
+        badges: ["Jumlah Baris", "Jumlah Kolom", "Tipe Data", "Kolom Hilang Sebelah"],
       },
       {
         icon: Percent,
         title: "Completeness & Uniqueness",
-        desc: "Untuk tiap kolom: berapa persen isinya tidak NULL (completeness), dan berapa banyak nilai unik di dalamnya (uniqueness) — dibandingkan source vs target untuk mendeteksi data yang hilang sebagian atau duplikasi.",
+        desc: "Seberapa lengkap dan seberapa unik isi tiap kolom, source vs target.",
+        badges: ["% Data Terisi", "Jumlah Nilai Unik"],
       },
       {
         icon: Calculator,
         title: "Metrik Statistik per Tipe Data",
         desc: "Bukan cuma SUM/MIN/MAX generik — formulanya beda per tipe kolom, lihat rincian di bawah.",
+        badges: ["Angka: SUM/MIN/MAX", "Teks: Unik & Panjang", "Tanggal: Rentang & Checksum"],
       },
     ],
   },
@@ -118,12 +121,14 @@ const LAYERS = [
       {
         icon: FileSearch,
         title: "Data yang Hilang",
-        desc: "Baris mana yang ada di source tapi hilang di target, atau sebaliknya — lengkap dengan key-nya, siap disalin ke WHERE ... IN (...) untuk investigasi atau re-insert.",
+        desc: "Baris yang ada di satu sisi tapi tidak ada di sisi lain, lengkap key-nya.",
+        badges: ["Hilang di Target", "Hilang di Source", "Siap Disalin ke Query"],
       },
       {
         icon: GitCompare,
         title: "Data dengan Nilai Berbeda",
-        desc: "Untuk baris yang key-nya sama di kedua sisi, LidValid bandingkan nilai tiap kolom satu per satu — kalau ada yang beda, ditampilkan persis: kolom apa, nilai source, nilai target.",
+        desc: "Baris yang key-nya cocok, tapi ada kolom yang isinya beda.",
+        badges: ["Kolom Mana", "Nilai Source", "Nilai Target"],
       },
     ],
   },
@@ -463,6 +468,13 @@ export default function LandingPage() {
                           </div>
                           <h3 className="mt-3 text-sm font-medium">{layer.title}</h3>
                           <p className="mt-2 text-xs text-muted-foreground">{layer.desc}</p>
+                          <div className="mt-3 flex flex-wrap gap-1">
+                            {layer.badges.map((b) => (
+                              <Badge key={b} variant="outline" className="text-[10px]">
+                                {b}
+                              </Badge>
+                            ))}
+                          </div>
                         </div>
                       ))}
                     </div>
