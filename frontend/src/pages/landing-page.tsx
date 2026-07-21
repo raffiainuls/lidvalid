@@ -102,8 +102,18 @@ const LAYERS = [
       },
       {
         icon: Calculator,
-        title: "Metrik Statistik",
-        desc: "SUM, MIN, MAX, dan metrik agregat lain pada kolom numerik & tanggal dibandingkan antar sisi. Kalau salah satu beda, itu tanda ada baris yang nilainya berubah — bahkan sebelum tahu baris mana persisnya.",
+        title: "Metrik Statistik per Tipe Data",
+        desc: (
+          <>
+            Bukan cuma SUM/MIN/MAX generik — <Emphasis>metriknya beda per kategori tipe kolom</Emphasis>:
+            kolom angka dibandingkan lewat SUM, MIN, MAX nilainya; kolom teks (di mana SUM tidak
+            masuk akal) dibandingkan lewat jumlah nilai unik plus MIN/MAX/rata-rata panjang
+            karakternya; kolom tanggal/timestamp dibandingkan lewat rentang tanggal (MIN/MAX) plus
+            checksum selisih hari dari tanggal acuan, supaya tanggal yang cuma bergeser tetap
+            ketahuan. Kalau salah satu metrik beda, itu tanda ada baris yang nilainya berubah —
+            bahkan sebelum tahu baris mana persisnya.
+          </>
+        ),
       },
     ],
   },
@@ -217,9 +227,14 @@ export default function LandingPage() {
             <ShieldCheck className="size-5 text-primary" />
             LidValid
           </div>
-          <Button asChild>
-            <Link to="/login">Masuk</Link>
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button variant="ghost" asChild>
+              <Link to="/register">Daftar</Link>
+            </Button>
+            <Button asChild>
+              <Link to="/login">Masuk</Link>
+            </Button>
+          </div>
         </div>
       </header>
 
@@ -385,7 +400,22 @@ export default function LandingPage() {
               </p>
             </div>
 
-            <div className="mt-14 space-y-6">
+            {/* Diagram arsitektur: Sumber/Target -> Tier 1 -> cabang PASS/FAIL -> Tier 2 -> Drilldown */}
+            <div className="mt-14 flex flex-col items-center">
+              <div className="flex w-full max-w-md items-center gap-3">
+                <div className="flex flex-1 items-center gap-2 rounded-xl border bg-card px-4 py-3 shadow-sm">
+                  <Database className="size-4 shrink-0 text-muted-foreground" />
+                  <span className="text-sm font-medium">DB Sumber</span>
+                </div>
+                <div className="flex flex-1 items-center gap-2 rounded-xl border bg-card px-4 py-3 shadow-sm">
+                  <Database className="size-4 shrink-0 text-muted-foreground" />
+                  <span className="text-sm font-medium">DB Target</span>
+                </div>
+              </div>
+              <ArrowDown className="my-2 size-5 text-muted-foreground" />
+            </div>
+
+            <div className="space-y-6">
               {LAYERS.map((group, groupIdx) => (
                 <div key={group.tier}>
                   <div
@@ -435,15 +465,26 @@ export default function LandingPage() {
                     </div>
                   </div>
                   {groupIdx === 0 && (
-                    <div className="flex justify-center py-2">
-                      <div className="flex flex-col items-center gap-1 text-muted-foreground">
+                    <div className="flex flex-col items-center gap-3 py-3">
+                      <div className="flex items-center gap-2 rounded-full border border-status-pass/40 bg-status-pass-bg px-4 py-1.5 text-xs font-medium text-status-pass">
+                        <Check className="size-3.5" /> PASS — semua metrik cocok, tabel valid (selesai di sini)
+                      </div>
+                      <div className="flex flex-col items-center gap-1 text-status-fail">
                         <ArrowDown className="size-5" />
-                        <span className="text-center text-xs">tabel yang FAIL eskalasi ke Tier 2</span>
+                        <span className="text-center text-xs font-medium">
+                          FAIL — ada metrik yang beda, eskalasi ke Tier 2
+                        </span>
                       </div>
                     </div>
                   )}
                 </div>
               ))}
+              <div className="flex flex-col items-center pt-1">
+                <ArrowDown className="size-5 text-muted-foreground" />
+                <div className="mt-2 flex items-center gap-2 rounded-full border bg-card px-4 py-2 text-sm font-medium shadow-sm">
+                  <SearchCode className="size-4 text-primary" /> Drilldown: baris & kolom persis yang beda
+                </div>
+              </div>
             </div>
           </div>
         </section>
@@ -524,6 +565,27 @@ export default function LandingPage() {
                   <p className="mt-2 text-sm text-muted-foreground">{s.desc}</p>
                 </div>
               ))}
+            </div>
+          </div>
+        </section>
+
+        {/* Closing CTA */}
+        <section className="border-t bg-muted/30 py-20">
+          <div className="mx-auto max-w-2xl px-6 text-center">
+            <h2 className="text-2xl font-semibold tracking-tight sm:text-3xl">Siap mulai validasi?</h2>
+            <p className="mt-3 text-muted-foreground">
+              Buat akun sendiri dan langsung mulai kelola Connection & Config milik Anda -- tidak
+              perlu menunggu diundang admin.
+            </p>
+            <div className="mt-8 flex items-center justify-center gap-3">
+              <Button size="lg" className="shadow-lg shadow-primary/20" asChild>
+                <Link to="/register">
+                  Buat Akun <ArrowRight className="size-4" />
+                </Link>
+              </Button>
+              <Button size="lg" variant="outline" asChild>
+                <Link to="/login">Sudah Punya Akun</Link>
+              </Button>
             </div>
           </div>
         </section>
