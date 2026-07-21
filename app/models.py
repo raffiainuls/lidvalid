@@ -67,6 +67,27 @@ class ValidationConfig(Base):
     source_connection = relationship("Connection", foreign_keys=[source_connection_id])
     target_connection = relationship("Connection", foreign_keys=[target_connection_id])
     tables = relationship("ConfigTable", back_populates="config", cascade="all, delete-orphan")
+    shares = relationship("ConfigShare", back_populates="config", cascade="all, delete-orphan")
+
+
+class ConfigShare(Base):
+    """Grants a non-owner user access to a ValidationConfig (and everything
+    that hangs off it -- its Runs/RunTables/Findings, reached by checking
+    the PARENT config's access rather than duplicating owner_id checks down
+    the whole chain, see check_config_access in app/auth.py)."""
+    __tablename__ = "config_shares"
+    id = Column(Integer, primary_key=True)
+    config_id = Column(Integer, ForeignKey("validation_configs.id"), nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    permission = Column(String(20), default="view")  # view | run | edit
+    created_at = Column(DateTime, default=_utcnow)
+
+    config = relationship("ValidationConfig", back_populates="shares")
+    user = relationship("User")
+
+    __table_args__ = (
+        Index("ix_config_shares_config_user", "config_id", "user_id", unique=True),
+    )
 
 
 class ConfigTable(Base):

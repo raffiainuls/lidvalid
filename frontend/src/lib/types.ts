@@ -113,6 +113,10 @@ export interface TestConnectionResult {
 
 export type ValidationMode = "tiered" | "aggregate" | "rowlevel_missing" | "rowlevel_full";
 
+// A config the owner hasn't shared has shared_permission=null for everyone
+// but the owner/admin (who see the full thing unrestricted, no tier needed).
+export type ConfigSharePermission = "view" | "run" | "edit";
+
 export interface ConfigListItem {
   id: number;
   name: string;
@@ -121,12 +125,33 @@ export interface ConfigListItem {
   table_count: number;
   default_mode: ValidationMode;
   last_run: RunListItem | null;
+  owner_username: string | null;
+  is_mine: boolean;
+  shared_permission: ConfigSharePermission | null;
+  share_count: number;
 }
 
 export interface ConnectionBrief {
   id: number;
   name: string;
   engine: Engine;
+  host: string;
+  port: number;
+}
+
+export interface ConfigShare {
+  id: number;
+  config_id: number;
+  user_id: number;
+  username: string;
+  display_name: string;
+  permission: ConfigSharePermission;
+  created_at: string | null;
+}
+
+export interface ConfigShareCreateInput {
+  username: string;
+  permission: ConfigSharePermission;
 }
 
 export interface ConfigTableRow {
@@ -170,6 +195,10 @@ export interface ConfigDetail {
   runs: RunListItem[];
   configs_for_copy: ConfigForCopy[];
   table_columns: Record<string, string[]>;
+  owner_username: string | null;
+  is_mine: boolean;
+  shared_permission: ConfigSharePermission | null;
+  can_manage_shares: boolean;
 }
 
 export interface MappingSuggestion {

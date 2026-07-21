@@ -10,13 +10,16 @@ import re
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import FileResponse, PlainTextResponse
 from pydantic import BaseModel
-from sqlalchemy import desc, func
+from sqlalchemy import desc, func, or_
 from sqlalchemy.orm import Session
 
 from validation_core.connectors import SUPPORTED_ENGINES
 
 from .. import models, security
-from ..auth import check_owner, scope_query, is_admin, require_login_api, require_role_api, require_csrf
+from ..auth import (
+    check_owner, scope_query, is_admin, require_login_api, require_role_api, require_csrf,
+    check_config_access, get_config_share,
+)
 from ..database import get_db
 from ..services import connections_service, dashboard_service, discovery_service, export_service, run_service
 from ..services.events_bus import bus
@@ -326,7 +329,10 @@ class RerunTableBody(BaseModel):
 
 
 def _serialize_connection_brief(conn: models.Connection) -> dict:
-    return {"id": conn.id, "name": conn.name, "engine": conn.engine}
+    # Host/port/engine only -- never secret_encrypted. Shown to anyone who can
+    # view the config (owner, admin, or a share of any tier), since knowing
+    # WHERE a config validates against is useful context, not a credential.
+    return {"id": conn.id, "name": conn.name, "engine": conn.engine, "host": conn.host, "port": conn.port}
 
 
 def _serialize_config_table(t: models.ConfigTable) -> dict:
@@ -344,8 +350,19 @@ def _serialize_config_table(t: models.ConfigTable) -> dict:
     }
 
 
+def _accessible_configs_query(db: Session, user: models.User):
+    """Every ValidationConfig this user can see: owned, or shared with them
+    (any permission tier -- even a view-only share makes it visible in
+    lists). Admin sees everything, same as scope_query elsewhere."""
+    q = db.query(models.ValidationConfig)
+    if is_admin(user):
+        return q
+    share_subq = db.query(models.ConfigShare.config_id).filter(models.ConfigShare.user_id == user.id)
+    return q.filter(or_(models.ValidationConfig.owner_id == user.id, models.ValidationConfig.id.in_(share_subq)))
+
+
 def _other_configs_for_copy(db: Session, config_id: int, user: models.User) -> list[models.ValidationConfig]:
-    q = scope_query(db.query(models.ValidationConfig), models.ValidationConfig, user)
+    q = _accessible_configs_query(db, user)
     return (
         q.filter(models.ValidationConfig.id != config_id, models.ValidationConfig.is_archived == False)  # noqa: E712
         .order_by(models.ValidationConfig.name).all()
@@ -354,12 +371,20 @@ def _other_configs_for_copy(db: Session, config_id: int, user: models.User) -> l
 
 @router.get("/configs")
 def api_list_configs(user: models.User = Depends(require_login_api), db: Session = Depends(get_db)):
-    configs = scope_query(db.query(models.ValidationConfig), models.ValidationConfig, user).filter_by(
-        is_archived=False
-    ).order_by(models.ValidationConfig.name).all()
+    configs = _accessible_configs_query(db, user).filter_by(is_archived=False).order_by(models.ValidationConfig.name).all()
+
+    my_shares = {}
+    if not is_admin(user):
+        my_shares = {s.config_id: s for s in db.query(models.ConfigShare).filter_by(user_id=user.id).all()}
+    owner_ids = {c.owner_id for c in configs if c.owner_id}
+    owners = {u.id: u for u in db.query(models.User).filter(models.User.id.in_(owner_ids)).all()} if owner_ids else {}
+
     out = []
     for c in configs:
         last_run = db.query(models.Run).filter_by(config_id=c.id).order_by(desc(models.Run.id)).first()
+        is_mine = c.owner_id == user.id
+        share = my_shares.get(c.id)
+        owner = owners.get(c.owner_id)
         out.append({
             "id": c.id,
             "name": c.name,
@@ -368,6 +393,10 @@ def api_list_configs(user: models.User = Depends(require_login_api), db: Session
             "table_count": len(c.tables),
             "default_mode": c.default_mode,
             "last_run": _serialize_run_summary(last_run) if last_run else None,
+            "owner_username": owner.username if owner else None,
+            "is_mine": is_mine,
+            "shared_permission": share.permission if share else None,
+            "share_count": len(c.shares) if (is_admin(user) or is_mine) else 0,
         })
     return out
 
@@ -396,10 +425,15 @@ def api_create_config(body: ConfigCreateBody, user: models.User = Depends(requir
 @router.get("/configs/{config_id}")
 def api_get_config(config_id: int, user: models.User = Depends(require_login_api), db: Session = Depends(get_db)):
     cfg = db.get(models.ValidationConfig, config_id)
-    check_owner(cfg, user)
-    runs = scope_query(db.query(models.Run), models.Run, user).filter_by(
-        config_id=config_id
-    ).order_by(desc(models.Run.id)).limit(20).all()
+    share = check_config_access(db, cfg, user, "view")
+    # NOT scope_query here -- a Run's owner_id is always the CONFIG's owner
+    # (see run_service.create_run), never the viewing user, so scope_query's
+    # owner_id==user.id filter would wrongly hide every run from a shared
+    # (non-owner) viewer. Access to the parent config, just checked above,
+    # is the only gate this needs.
+    runs = db.query(models.Run).filter_by(config_id=config_id).order_by(desc(models.Run.id)).limit(20).all()
+    is_mine = cfg.owner_id == user.id
+    owner = db.get(models.User, cfg.owner_id) if cfg.owner_id else None
     return {
         "id": cfg.id,
         "name": cfg.name,
@@ -416,14 +450,18 @@ def api_get_config(config_id: int, user: models.User = Depends(require_login_api
         "table_columns": discovery_service.columns_by_table(
             cfg.source_connection, [t.source_table for t in cfg.tables]
         ),
+        "owner_username": owner.username if owner else None,
+        "is_mine": is_mine,
+        "shared_permission": share.permission if share else None,
+        "can_manage_shares": is_admin(user) or is_mine,
     }
 
 
 @router.put("/configs/{config_id}/tables")
-def api_save_config_tables(config_id: int, body: ConfigTablesBody, user: models.User = Depends(require_role_api("editor")),
+def api_save_config_tables(config_id: int, body: ConfigTablesBody, user: models.User = Depends(require_login_api),
                             db: Session = Depends(get_db), _csrf: None = Depends(require_csrf)):
     cfg = db.get(models.ValidationConfig, config_id)
-    check_owner(cfg, user)
+    check_config_access(db, cfg, user, "edit")
     for t in list(cfg.tables):  # replace-all: simplest correct approach at this scale
         db.delete(t)
     db.flush()
@@ -452,10 +490,10 @@ def api_save_config_tables(config_id: int, body: ConfigTablesBody, user: models.
 
 
 @router.post("/configs/{config_id}/suggest")
-def api_config_suggest(config_id: int, body: ConfigSuggestBody, user: models.User = Depends(require_role_api("editor")),
+def api_config_suggest(config_id: int, body: ConfigSuggestBody, user: models.User = Depends(require_login_api),
                         db: Session = Depends(get_db), _csrf: None = Depends(require_csrf)):
     cfg = db.get(models.ValidationConfig, config_id)
-    check_owner(cfg, user)
+    check_config_access(db, cfg, user, "edit")
     existing = {t.source_table for t in cfg.tables}
     all_suggestions = discovery_service.suggest_mappings(cfg.source_connection, cfg.target_connection, body.prefix)
     suggestions = [s for s in all_suggestions if s["target_table"] and s["source_table"] not in existing]
@@ -467,12 +505,12 @@ def api_config_suggest(config_id: int, body: ConfigSuggestBody, user: models.Use
 
 
 @router.post("/configs/{config_id}/copy-from")
-def api_config_copy_from(config_id: int, body: ConfigCopyFromBody, user: models.User = Depends(require_role_api("editor")),
+def api_config_copy_from(config_id: int, body: ConfigCopyFromBody, user: models.User = Depends(require_login_api),
                           db: Session = Depends(get_db), _csrf: None = Depends(require_csrf)):
     cfg = db.get(models.ValidationConfig, config_id)
-    check_owner(cfg, user)
+    check_config_access(db, cfg, user, "edit")
     other = db.get(models.ValidationConfig, body.source_config_id)
-    check_owner(other, user)
+    check_config_access(db, other, user, "view")
     existing = {t.source_table for t in cfg.tables}
     suggestions = discovery_service.suggest_from_config(other, existing) if other else []
     names = [t.source_table for t in cfg.tables] + [s["source_table"] for s in suggestions]
@@ -483,10 +521,10 @@ def api_config_copy_from(config_id: int, body: ConfigCopyFromBody, user: models.
 
 
 @router.post("/configs/{config_id}/run")
-def api_config_run_now(config_id: int, body: ConfigRunBody, user: models.User = Depends(require_role_api("editor")),
+def api_config_run_now(config_id: int, body: ConfigRunBody, user: models.User = Depends(require_login_api),
                         db: Session = Depends(get_db), _csrf: None = Depends(require_csrf)):
     cfg = db.get(models.ValidationConfig, config_id)
-    check_owner(cfg, user)
+    check_config_access(db, cfg, user, "run")
     run = run_service.create_run(db, cfg, mode=body.mode or None, trigger_type="manual")
     run_service.start_run_async(run.id)
     return {"run_id": run.id}
@@ -507,7 +545,7 @@ def _serialize_status_run_table(rt: models.RunTable) -> dict:
 @router.get("/configs/{config_id}/status")
 def api_config_status(config_id: int, user: models.User = Depends(require_login_api), db: Session = Depends(get_db)):
     cfg = db.get(models.ValidationConfig, config_id)
-    check_owner(cfg, user)
+    check_config_access(db, cfg, user, "view")
     runs = (
         db.query(models.Run).filter_by(config_id=config_id)
         .order_by(desc(models.Run.id)).limit(STATUS_HISTORY_RUNS).all()
@@ -557,10 +595,10 @@ def api_config_status(config_id: int, user: models.User = Depends(require_login_
 
 
 @router.post("/configs/{config_id}/rerun-table")
-def api_config_rerun_table(config_id: int, body: RerunTableBody, user: models.User = Depends(require_role_api("editor")),
+def api_config_rerun_table(config_id: int, body: RerunTableBody, user: models.User = Depends(require_login_api),
                             db: Session = Depends(get_db), _csrf: None = Depends(require_csrf)):
     cfg = db.get(models.ValidationConfig, config_id)
-    check_owner(cfg, user)
+    check_config_access(db, cfg, user, "run")
     valid = {t.source_table for t in cfg.tables if t.enabled}
     if body.source_table not in valid:
         raise HTTPException(status_code=400, detail=f"Tabel {body.source_table} tidak ada (atau nonaktif) di config ini")
@@ -571,7 +609,7 @@ def api_config_rerun_table(config_id: int, body: RerunTableBody, user: models.Us
 
 @router.get("/configs/{config_id}/table-columns")
 def config_table_columns(config_id: int, table: str, side: str = "source",
-                          user: models.User = Depends(require_role_api("editor")), db: Session = Depends(get_db)):
+                          user: models.User = Depends(require_login_api), db: Session = Depends(get_db)):
     """Column names for one table on the config's source/target connection —
     used by config_detail.html's JS to turn a freshly-typed table name (in a
     manually-added row) into proper key/chunk/date/exclude dropdowns, the
@@ -579,7 +617,7 @@ def config_table_columns(config_id: int, table: str, side: str = "source",
     cfg = db.get(models.ValidationConfig, config_id)
     if not cfg:
         return {"columns": [], "error": "config not found"}
-    check_owner(cfg, user)
+    check_config_access(db, cfg, user, "edit")
     conn = cfg.target_connection if side == "target" else cfg.source_connection
     if not table:
         return {"columns": []}
@@ -588,6 +626,103 @@ def config_table_columns(config_id: int, table: str, side: str = "source",
         return {"columns": [c["name"] for c in cols]}
     except Exception as exc:  # noqa: BLE001 - surfaced to the JS caller, not a 500
         return {"columns": [], "error": str(exc)}
+
+
+# --------------------------------------------------------------- config shares
+VALID_SHARE_PERMISSIONS = ("view", "run", "edit")
+
+
+class ConfigShareCreateBody(BaseModel):
+    username: str
+    permission: str = "view"
+
+
+class ConfigShareUpdateBody(BaseModel):
+    permission: str
+
+
+def _serialize_config_share(s: models.ConfigShare) -> dict:
+    return {
+        "id": s.id,
+        "config_id": s.config_id,
+        "user_id": s.user_id,
+        "username": s.user.username,
+        "display_name": s.user.display_name,
+        "permission": s.permission,
+        "created_at": s.created_at.isoformat() if s.created_at else None,
+    }
+
+
+def _require_config_owner_or_admin(cfg: models.ValidationConfig | None, user: models.User) -> None:
+    """Only the true owner (or an admin) manages WHO a config is shared
+    with -- unlike view/run/edit access to the config's data itself, share
+    management is never delegated by a share (an "edit"-tier collaborator
+    still can't add/remove other people)."""
+    if cfg is None:
+        raise HTTPException(status_code=404)
+    if not is_admin(user) and cfg.owner_id != user.id:
+        raise HTTPException(status_code=404)
+
+
+@router.get("/configs/{config_id}/shares")
+def api_list_config_shares(config_id: int, user: models.User = Depends(require_login_api), db: Session = Depends(get_db)):
+    cfg = db.get(models.ValidationConfig, config_id)
+    _require_config_owner_or_admin(cfg, user)
+    shares = db.query(models.ConfigShare).filter_by(config_id=config_id).order_by(models.ConfigShare.id).all()
+    return [_serialize_config_share(s) for s in shares]
+
+
+@router.post("/configs/{config_id}/shares", status_code=201)
+def api_create_config_share(config_id: int, body: ConfigShareCreateBody,
+                             user: models.User = Depends(require_login_api),
+                             db: Session = Depends(get_db), _csrf: None = Depends(require_csrf)):
+    cfg = db.get(models.ValidationConfig, config_id)
+    _require_config_owner_or_admin(cfg, user)
+    if body.permission not in VALID_SHARE_PERMISSIONS:
+        raise HTTPException(status_code=400, detail=f"Permission tidak dikenal: {body.permission}")
+    username = body.username.strip()
+    target = db.query(models.User).filter_by(username=username).first()
+    if target is None:
+        raise HTTPException(status_code=404, detail=f'User "{username}" tidak ditemukan')
+    if target.id == cfg.owner_id:
+        raise HTTPException(status_code=400, detail="Tidak bisa share ke pemilik config ini sendiri")
+    if get_config_share(db, config_id, target.id):
+        raise HTTPException(status_code=409, detail=f"Config ini sudah di-share ke {target.username}")
+    share = models.ConfigShare(config_id=config_id, user_id=target.id, permission=body.permission)
+    db.add(share)
+    db.commit()
+    db.refresh(share)
+    return _serialize_config_share(share)
+
+
+@router.put("/configs/{config_id}/shares/{share_id}")
+def api_update_config_share(config_id: int, share_id: int, body: ConfigShareUpdateBody,
+                             user: models.User = Depends(require_login_api),
+                             db: Session = Depends(get_db), _csrf: None = Depends(require_csrf)):
+    cfg = db.get(models.ValidationConfig, config_id)
+    _require_config_owner_or_admin(cfg, user)
+    if body.permission not in VALID_SHARE_PERMISSIONS:
+        raise HTTPException(status_code=400, detail=f"Permission tidak dikenal: {body.permission}")
+    share = db.get(models.ConfigShare, share_id)
+    if share is None or share.config_id != config_id:
+        raise HTTPException(status_code=404)
+    share.permission = body.permission
+    db.commit()
+    db.refresh(share)
+    return _serialize_config_share(share)
+
+
+@router.delete("/configs/{config_id}/shares/{share_id}")
+def api_delete_config_share(config_id: int, share_id: int, user: models.User = Depends(require_login_api),
+                             db: Session = Depends(get_db), _csrf: None = Depends(require_csrf)):
+    cfg = db.get(models.ValidationConfig, config_id)
+    _require_config_owner_or_admin(cfg, user)
+    share = db.get(models.ConfigShare, share_id)
+    if share is None or share.config_id != config_id:
+        raise HTTPException(status_code=404)
+    db.delete(share)
+    db.commit()
+    return {"ok": True}
 
 
 # ---------------------------------------------------------------------- runs
@@ -620,7 +755,9 @@ def _serialize_run_table_row(rt: models.RunTable) -> dict:
 @router.get("/runs/{run_id}")
 def api_get_run(run_id: int, user: models.User = Depends(require_login_api), db: Session = Depends(get_db)):
     run = db.get(models.Run, run_id)
-    check_owner(run, user)
+    if run is None:
+        raise HTTPException(status_code=404)
+    check_config_access(db, run.config, user, "view")
     run_tables = db.query(models.RunTable).filter_by(run_id=run_id).order_by(models.RunTable.id).all()
     events, _ = bus.get_since(run_id, 0)
     return {
@@ -638,19 +775,23 @@ def api_get_run(run_id: int, user: models.User = Depends(require_login_api), db:
 
 
 @router.post("/runs/{run_id}/cancel")
-def api_cancel_run(run_id: int, user: models.User = Depends(require_role_api("editor")),
+def api_cancel_run(run_id: int, user: models.User = Depends(require_login_api),
                     db: Session = Depends(get_db), _csrf: None = Depends(require_csrf)):
     run = db.get(models.Run, run_id)
-    check_owner(run, user)
+    if run is None:
+        raise HTTPException(status_code=404)
+    check_config_access(db, run.config, user, "run")
     bus.request_cancel(run_id)
     return {"ok": True}
 
 
 @router.post("/runs/{run_id}/resume")
-def api_resume_run(run_id: int, body: ResumeRunBody, user: models.User = Depends(require_role_api("editor")),
+def api_resume_run(run_id: int, body: ResumeRunBody, user: models.User = Depends(require_login_api),
                     db: Session = Depends(get_db), _csrf: None = Depends(require_csrf)):
     run = db.get(models.Run, run_id)
-    check_owner(run, user)
+    if run is None:
+        raise HTTPException(status_code=404)
+    check_config_access(db, run.config, user, "run")
     new_run = run_service.resume_run(db, run, scope=body.scope)
     if new_run is None:
         label = _SCOPE_LABELS.get(body.scope, body.scope)
@@ -661,7 +802,9 @@ def api_resume_run(run_id: int, body: ResumeRunBody, user: models.User = Depends
 @router.get("/runs/{run_id}/export.xlsx")
 def api_export_run(run_id: int, user: models.User = Depends(require_login_api), db: Session = Depends(get_db)):
     run = db.get(models.Run, run_id)
-    check_owner(run, user)
+    if run is None:
+        raise HTTPException(status_code=404)
+    check_config_access(db, run.config, user, "view")
     path = export_service.export_run_to_excel(db, run)
     return FileResponse(path, filename=path.name,
                          media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
@@ -690,7 +833,9 @@ def api_get_run_table(run_id: int, run_table_id: int, user: models.User = Depend
     switching in the SPA is client-side with no extra round-trip. Only
     Missing Keys / Value Diffs are paginated (see /rowlevel below)."""
     run = db.get(models.Run, run_id)
-    check_owner(run, user)
+    if run is None:
+        raise HTTPException(status_code=404)
+    check_config_access(db, run.config, user, "view")
     rt = db.get(models.RunTable, run_table_id)
     if rt is None or rt.run_id != run_id:
         raise HTTPException(status_code=404)
@@ -749,7 +894,9 @@ def api_get_run_table(run_id: int, run_table_id: int, user: models.User = Depend
 def api_get_run_table_rowlevel(run_id: int, run_table_id: int, type: str, column: str = "", page: int = 1,
                                 user: models.User = Depends(require_login_api), db: Session = Depends(get_db)):
     run = db.get(models.Run, run_id)
-    check_owner(run, user)
+    if run is None:
+        raise HTTPException(status_code=404)
+    check_config_access(db, run.config, user, "view")
     rt = db.get(models.RunTable, run_table_id)
     if rt is None or rt.run_id != run_id:
         raise HTTPException(status_code=404)
@@ -803,7 +950,13 @@ def api_get_run_table_keys(run_id: int, run_table_id: int, kind: str = "missing_
     if rt is None or rt.run_id != run_id:
         return PlainTextResponse("-- tabel tidak ditemukan", status_code=404)
     run = db.get(models.Run, run_id)
-    if run is None or (not is_admin(user) and run.owner_id != user.id):
+    if run is None:
+        return PlainTextResponse("-- tabel tidak ditemukan", status_code=404)
+    # Read-only action (copies keys for investigation) -- any share tier,
+    # even view-only, is enough. Kept as a manual check (not
+    # check_config_access, which raises HTTPException) so a denied request
+    # still gets this endpoint's plain-text 404 body, not a JSON error.
+    if not is_admin(user) and run.config.owner_id != user.id and get_config_share(db, run.config_id, user.id) is None:
         return PlainTextResponse("-- tabel tidak ditemukan", status_code=404)
 
     FRL = models.FindingRowLevel

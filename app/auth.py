@@ -83,3 +83,38 @@ def check_owner(obj, user: models.User) -> None:
     id)."""
     if obj is None or (not is_admin(user) and obj.owner_id != user.id):
         raise HTTPException(status_code=404)
+
+
+# --------------------------------------------------------- config sharing
+# A ValidationConfig's owner can grant OTHER users access without making
+# them the owner, at one of three tiers. Everything that hangs off a config
+# (its Runs/RunTables/Findings) is reached by checking THIS config, not by
+# duplicating share rows down the whole chain -- Run.owner_id is always
+# copied from config.owner_id at creation time (see run_service.create_run),
+# so a shared user's access to a Run is entirely determined by their access
+# to run.config.
+PERMISSION_RANK = {"view": 0, "run": 1, "edit": 2}
+
+
+def get_config_share(db: Session, config_id: int, user_id: int) -> models.ConfigShare | None:
+    return db.query(models.ConfigShare).filter_by(config_id=config_id, user_id=user_id).first()
+
+
+def check_config_access(
+    db: Session, config: models.ValidationConfig | None, user: models.User, need: str = "view",
+) -> models.ConfigShare | None:
+    """404 if `config` doesn't exist and the user has no access at all; 403
+    if they have a share but it's below the `need` tier. Returns the
+    ConfigShare row when access comes from a share, or None when it's the
+    owner/an admin (i.e. unrestricted) -- callers that need to distinguish
+    "owner" from "shared editor" for UI purposes can check the return value."""
+    if config is None:
+        raise HTTPException(status_code=404)
+    if is_admin(user) or config.owner_id == user.id:
+        return None
+    share = get_config_share(db, config.id, user.id)
+    if share is None:
+        raise HTTPException(status_code=404)
+    if PERMISSION_RANK[share.permission] < PERMISSION_RANK[need]:
+        raise HTTPException(status_code=403, detail="Akses Anda ke config ini tidak cukup untuk aksi ini")
+    return share

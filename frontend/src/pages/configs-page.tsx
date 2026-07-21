@@ -13,8 +13,11 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { StatusBadge } from "@/components/status-badge";
+import { Badge } from "@/components/ui/badge";
 import { ConfigFormDialog } from "@/components/configs/config-form-dialog";
 import { useConfigs } from "@/hooks/use-configs";
+
+const PERMISSION_LABEL = { view: "Lihat Saja", run: "Lihat & Jalankan", edit: "Edit Penuh" } as const;
 
 export default function ConfigsPage() {
   const { data: configs, isLoading } = useConfigs();
@@ -58,7 +61,21 @@ export default function ConfigsPage() {
                       className="cursor-pointer"
                       onClick={() => navigate(`/configs/${cfg.id}`)}
                     >
-                      <TableCell className="font-medium">{cfg.name}</TableCell>
+                      <TableCell className="font-medium">
+                        <div className="flex items-center gap-1.5">
+                          {cfg.name}
+                          {!cfg.is_mine && cfg.shared_permission && (
+                            <Badge variant="outline" className="text-[10px] font-normal">
+                              Dibagikan oleh {cfg.owner_username} · {PERMISSION_LABEL[cfg.shared_permission]}
+                            </Badge>
+                          )}
+                          {cfg.is_mine && cfg.share_count > 0 && (
+                            <Badge variant="secondary" className="text-[10px] font-normal">
+                              Dibagikan ke {cfg.share_count} orang
+                            </Badge>
+                          )}
+                        </div>
+                      </TableCell>
                       <TableCell className="font-mono text-xs">
                         {cfg.source_connection_name} → {cfg.target_connection_name}
                       </TableCell>

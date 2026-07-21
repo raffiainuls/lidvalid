@@ -68,7 +68,7 @@ function blankRow(): EditableRow {
   };
 }
 
-export function TableMappingEditor({ config }: { config: ConfigDetail }) {
+export function TableMappingEditor({ config, readOnly = false }: { config: ConfigDetail; readOnly?: boolean }) {
   const [rows, setRows] = useState<EditableRow[]>(() => config.tables.map(fromSaved));
   const [tableColumns, setTableColumns] = useState<Record<string, string[]>>(config.table_columns);
   const [prefix, setPrefix] = useState("");
@@ -194,22 +194,30 @@ export function TableMappingEditor({ config }: { config: ConfigDetail }) {
 
   return (
     <div className="grid gap-3">
-      <div className="flex flex-wrap items-center gap-2">
-        <Input
-          placeholder="prefix target, mis. raw_"
-          value={prefix}
-          onChange={(e) => setPrefix(e.target.value)}
-          className="h-8 w-56"
-        />
-        <Button size="sm" variant="outline" onClick={handleSuggest} disabled={suggestMutation.isPending}>
-          <Search className="size-3.5" /> Auto-suggest dari koneksi
-        </Button>
-        <span className="text-xs text-muted-foreground">
-          key columns (termasuk composite) otomatis diisi dari PRIMARY KEY (MySQL) / sorting key (ClickHouse)
-        </span>
-      </div>
+      {readOnly && (
+        <p className="rounded-md bg-muted/60 px-3 py-2 text-xs text-muted-foreground">
+          Anda cuma punya akses lihat ke config ini -- pemetaan tabel tidak bisa diubah.
+        </p>
+      )}
 
-      {config.configs_for_copy.length > 0 && (
+      {!readOnly && (
+        <div className="flex flex-wrap items-center gap-2">
+          <Input
+            placeholder="prefix target, mis. raw_"
+            value={prefix}
+            onChange={(e) => setPrefix(e.target.value)}
+            className="h-8 w-56"
+          />
+          <Button size="sm" variant="outline" onClick={handleSuggest} disabled={suggestMutation.isPending}>
+            <Search className="size-3.5" /> Auto-suggest dari koneksi
+          </Button>
+          <span className="text-xs text-muted-foreground">
+            key columns (termasuk composite) otomatis diisi dari PRIMARY KEY (MySQL) / sorting key (ClickHouse)
+          </span>
+        </div>
+      )}
+
+      {!readOnly && config.configs_for_copy.length > 0 && (
         <div className="flex flex-wrap items-center gap-2">
           <Select value={copyFromId} onValueChange={setCopyFromId}>
             <SelectTrigger className="h-8 w-64">
@@ -232,6 +240,7 @@ export function TableMappingEditor({ config }: { config: ConfigDetail }) {
         </div>
       )}
 
+      <fieldset disabled={readOnly} className="contents">
       <div className="overflow-x-auto rounded-md border">
         <table className="w-full min-w-[1100px] border-collapse text-sm">
           <thead>
@@ -461,6 +470,7 @@ export function TableMappingEditor({ config }: { config: ConfigDetail }) {
           {saveMutation.isPending ? "Menyimpan…" : "Simpan Pemetaan Tabel"}
         </Button>
       </div>
+      </fieldset>
     </div>
   );
 }

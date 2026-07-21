@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { toast } from "sonner";
-import { BarChart3, Play } from "lucide-react";
+import { BarChart3, Play, Share2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -22,12 +22,15 @@ import {
 } from "@/components/ui/select";
 import { StatusBadge } from "@/components/status-badge";
 import { TableMappingEditor } from "@/components/configs/table-mapping-editor";
+import { ShareConfigDialog } from "@/components/configs/share-config-dialog";
 import { useConfig, useRunConfig } from "@/hooks/use-configs";
 import { MODE_OVERRIDE_OPTIONS } from "@/lib/constants";
 import { formatDateTime } from "@/lib/format";
 import { ApiError } from "@/lib/api";
 
 const RUN_MODE_DEFAULT = "__default__";
+
+const PERMISSION_LABEL = { view: "Lihat Saja", run: "Lihat & Jalankan", edit: "Edit Penuh" } as const;
 
 export default function ConfigDetailPage() {
   const { id } = useParams();
@@ -36,6 +39,7 @@ export default function ConfigDetailPage() {
   const { data: config, isLoading } = useConfig(configId);
   const runMutation = useRunConfig(configId);
   const [runMode, setRunMode] = useState(RUN_MODE_DEFAULT);
+  const [shareOpen, setShareOpen] = useState(false);
 
   async function handleRunNow() {
     try {
@@ -56,37 +60,56 @@ export default function ConfigDetailPage() {
     );
   }
 
+  const canEdit = config.can_manage_shares || config.shared_permission === "edit";
+  const canRun = canEdit || config.shared_permission === "run";
+
   return (
     <div className="grid gap-6">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <h1 className="text-2xl font-semibold tracking-tight">{config.name}</h1>
         <div className="flex items-center gap-2">
+          {config.can_manage_shares && (
+            <Button variant="outline" onClick={() => setShareOpen(true)}>
+              <Share2 className="size-4" /> Bagikan
+            </Button>
+          )}
           <Button variant="outline" asChild>
             <Link to={`/configs/${config.id}/status`}>
               <BarChart3 className="size-4" /> Status Tabel
             </Link>
           </Button>
-          <Select value={runMode} onValueChange={setRunMode}>
-            <SelectTrigger className="w-56 font-mono text-xs">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value={RUN_MODE_DEFAULT}>(pakai default: {config.default_mode})</SelectItem>
-              {MODE_OVERRIDE_OPTIONS.map((m) => (
-                <SelectItem key={m.value} value={m.value}>
-                  {m.label}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-          <Button onClick={handleRunNow} disabled={runMutation.isPending}>
-            <Play className="size-4" /> Run Now
-          </Button>
+          {canRun && (
+            <>
+              <Select value={runMode} onValueChange={setRunMode}>
+                <SelectTrigger className="w-56 font-mono text-xs">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={RUN_MODE_DEFAULT}>(pakai default: {config.default_mode})</SelectItem>
+                  {MODE_OVERRIDE_OPTIONS.map((m) => (
+                    <SelectItem key={m.value} value={m.value}>
+                      {m.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <Button onClick={handleRunNow} disabled={runMutation.isPending}>
+                <Play className="size-4" /> Run Now
+              </Button>
+            </>
+          )}
         </div>
       </div>
       <p className="-mt-4 font-mono text-sm text-muted-foreground">
         {config.source_connection.name} ({config.source_connection.engine}) → {config.target_connection.name} (
         {config.target_connection.engine}) · {config.tables.length} tabel
+        {!config.is_mine && config.shared_permission && (
+          <>
+            {" "}
+            · dibagikan oleh <span className="font-medium">{config.owner_username}</span> (
+            {PERMISSION_LABEL[config.shared_permission]})
+          </>
+        )}
       </p>
 
       <Card>
@@ -94,7 +117,7 @@ export default function ConfigDetailPage() {
           <CardTitle className="text-base">Pemetaan Tabel</CardTitle>
         </CardHeader>
         <CardContent>
-          <TableMappingEditor config={config} />
+          <TableMappingEditor config={config} readOnly={!canEdit} />
         </CardContent>
       </Card>
 
@@ -145,6 +168,15 @@ export default function ConfigDetailPage() {
           </Table>
         </CardContent>
       </Card>
+
+      {config.can_manage_shares && (
+        <ShareConfigDialog
+          open={shareOpen}
+          onOpenChange={setShareOpen}
+          configId={config.id}
+          configName={config.name}
+        />
+      )}
     </div>
   );
 }
