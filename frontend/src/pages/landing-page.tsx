@@ -26,6 +26,9 @@ import {
   ShieldAlert,
   X,
   Check,
+  Hash,
+  CaseSensitive,
+  CalendarClock,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -103,17 +106,7 @@ const LAYERS = [
       {
         icon: Calculator,
         title: "Metrik Statistik per Tipe Data",
-        desc: (
-          <>
-            Bukan cuma SUM/MIN/MAX generik — <Emphasis>metriknya beda per kategori tipe kolom</Emphasis>:
-            kolom angka dibandingkan lewat SUM, MIN, MAX nilainya; kolom teks (di mana SUM tidak
-            masuk akal) dibandingkan lewat jumlah nilai unik plus MIN/MAX/rata-rata panjang
-            karakternya; kolom tanggal/timestamp dibandingkan lewat rentang tanggal (MIN/MAX) plus
-            checksum selisih hari dari tanggal acuan, supaya tanggal yang cuma bergeser tetap
-            ketahuan. Kalau salah satu metrik beda, itu tanda ada baris yang nilainya berubah —
-            bahkan sebelum tahu baris mana persisnya.
-          </>
-        ),
+        desc: "Bukan cuma SUM/MIN/MAX generik — formulanya beda per tipe kolom, lihat rincian di bawah.",
       },
     ],
   },
@@ -134,6 +127,16 @@ const LAYERS = [
       },
     ],
   },
+];
+
+// Rincian visual utk "Metrik Statistik" di atas -- sengaja badge/pill, BUKAN
+// paragraf, supaya kelihatan sekali lihat kalau formulanya beda per tipe
+// kolom (angka vs teks vs tanggal tidak masuk akal dibandingkan dengan cara
+// yang sama).
+const STAT_TYPE_METRICS = [
+  { icon: Hash, label: "Kolom Angka", metrics: ["SUM", "MIN", "MAX"] },
+  { icon: CaseSensitive, label: "Kolom Teks", metrics: ["Jumlah Nilai Unik", "Panjang Min", "Panjang Max", "Panjang Rata-rata"] },
+  { icon: CalendarClock, label: "Kolom Tanggal & Waktu", metrics: ["Rentang Min–Max", "Checksum Selisih Hari"] },
 ];
 
 const FEATURES = [
@@ -463,6 +466,31 @@ export default function LandingPage() {
                         </div>
                       ))}
                     </div>
+
+                    {groupIdx === 0 && (
+                      <div className="mt-4 rounded-xl border border-dashed bg-card/60 p-4">
+                        <p className="mb-3 text-center text-xs font-medium text-muted-foreground">
+                          Rincian Metrik Statistik — beda formula per tipe kolom
+                        </p>
+                        <div className="grid gap-3 sm:grid-cols-3">
+                          {STAT_TYPE_METRICS.map((t) => (
+                            <div key={t.label} className="rounded-lg border bg-card p-3">
+                              <div className="flex items-center gap-1.5">
+                                <t.icon className="size-3.5 text-primary" />
+                                <span className="text-xs font-semibold">{t.label}</span>
+                              </div>
+                              <div className="mt-2 flex flex-wrap gap-1">
+                                {t.metrics.map((m) => (
+                                  <Badge key={m} variant="outline" className="text-[10px]">
+                                    {m}
+                                  </Badge>
+                                ))}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
                   </div>
                   {groupIdx === 0 && (
                     <div className="flex flex-col items-center gap-3 py-3">
