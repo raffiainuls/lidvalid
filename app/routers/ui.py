@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session
 from validation_core.connectors import SUPPORTED_ENGINES
 
 from .. import models, security
-from ..auth import get_current_user, require_login
+from ..auth import get_current_user, require_login, require_role, scope_query, check_owner, is_admin
 from ..database import get_db
 from ..services import connections_service, discovery_service, export_service, run_service
 from ..services.events_bus import bus
@@ -128,9 +128,11 @@ def root():
 # ---------------------------------------------------------------- dashboard
 @router.get("/dashboard", response_class=HTMLResponse)
 def dashboard(request: Request, user: models.User = Depends(require_login), db: Session = Depends(get_db)):
-    recent_runs = db.query(models.Run).order_by(desc(models.Run.id)).limit(10).all()
+    recent_runs = scope_query(db.query(models.Run), models.Run, user).order_by(desc(models.Run.id)).limit(10).all()
     last_run = recent_runs[0] if recent_runs else None
-    running_runs = db.query(models.Run).filter(models.Run.status.in_(["running", "queued"])).all()
+    running_runs = scope_query(db.query(models.Run), models.Run, user).filter(
+        models.Run.status.in_(["running", "queued"])
+    ).all()
     summary = (last_run.summary or {}) if last_run else {}
     total = summary.get("tables_total") or 0
     passc = summary.get("pass") or 0
@@ -138,7 +140,7 @@ def dashboard(request: Request, user: models.User = Depends(require_login), db: 
 
     # Pass-rate trend: last N *completed* runs, oldest -> newest, for the bar chart.
     trend_runs = (
-        db.query(models.Run)
+        scope_query(db.query(models.Run), models.Run, user)
         .filter(models.Run.status == "completed")
         .order_by(desc(models.Run.id)).limit(12).all()
     )
@@ -151,12 +153,19 @@ def dashboard(request: Request, user: models.User = Depends(require_login), db: 
         trend.append({"id": r.id, "rate": rate, "dominant": dominant})
 
     # Problem tables: source/target pairs that show up as FAIL/ERROR most often across run history.
-    problem_rows = (
+    problem_q = (
         db.query(
             models.RunTable.source_table, models.RunTable.target_table,
             func.count(models.RunTable.id).label("bad_count"),
         )
         .filter(models.RunTable.status.in_(["fail", "error"]))
+    )
+    if not is_admin(user):
+        problem_q = problem_q.join(models.Run, models.RunTable.run_id == models.Run.id).filter(
+            models.Run.owner_id == user.id
+        )
+    problem_rows = (
+        problem_q
         .group_by(models.RunTable.source_table, models.RunTable.target_table)
         .order_by(desc("bad_count"))
         .limit(6)
@@ -178,16 +187,20 @@ def dashboard(request: Request, user: models.User = Depends(require_login), db: 
 
 
 # --------------------------------------------------------------- connections
+# Connections are per-user (owner_id), same as configs/runs -- not shared
+# infrastructure. editor+ manage their OWN; admin sees/manages everyone's.
+# Note: Connection.name is still a globally-unique column (pre-dates
+# per-user scoping) -- two different users can't both use the same name.
 @router.get("/connections", response_class=HTMLResponse)
 def connections_list(request: Request, user: models.User = Depends(require_login), db: Session = Depends(get_db)):
-    conns = db.query(models.Connection).order_by(models.Connection.name).all()
+    conns = scope_query(db.query(models.Connection), models.Connection, user).order_by(models.Connection.name).all()
     return templates.TemplateResponse(request, "connections.html", {
         "request": request, "user": user, "active": "connections", "connections": conns,
     })
 
 
 @router.get("/connections/new", response_class=HTMLResponse)
-def connection_new_form(request: Request, user: models.User = Depends(require_login)):
+def connection_new_form(request: Request, user: models.User = Depends(require_role("editor"))):
     return templates.TemplateResponse(request, "connection_form.html", {
         "request": request, "user": user, "active": "connections", "connection": None, "engines": SUPPORTED_ENGINES,
     })
@@ -196,9 +209,10 @@ def connection_new_form(request: Request, user: models.User = Depends(require_lo
 @router.post("/connections")
 def connection_create(name: str = Form(...), engine: str = Form(...), host: str = Form(""),
                        port: int = Form(0), database: str = Form(""), username: str = Form(""),
-                       password: str = Form(""), user: models.User = Depends(require_login),
+                       password: str = Form(""), user: models.User = Depends(require_role("editor")),
                        db: Session = Depends(get_db)):
     conn = models.Connection(
+        owner_id=user.id,
         name=name, engine=engine, host=host, port=int(port or 0), database=database, username=username,
         secret_encrypted=security.encrypt_secret(password) if password else None,
     )
@@ -208,9 +222,10 @@ def connection_create(name: str = Form(...), engine: str = Form(...), host: str 
 
 
 @router.get("/connections/{conn_id}/edit", response_class=HTMLResponse)
-def connection_edit_form(conn_id: int, request: Request, user: models.User = Depends(require_login),
+def connection_edit_form(conn_id: int, request: Request, user: models.User = Depends(require_role("editor")),
                           db: Session = Depends(get_db)):
     conn = db.get(models.Connection, conn_id)
+    check_owner(conn, user)
     return templates.TemplateResponse(request, "connection_form.html", {
         "request": request, "user": user, "active": "connections", "connection": conn, "engines": SUPPORTED_ENGINES,
     })
@@ -219,9 +234,10 @@ def connection_edit_form(conn_id: int, request: Request, user: models.User = Dep
 @router.post("/connections/{conn_id}")
 def connection_update(conn_id: int, name: str = Form(...), engine: str = Form(...), host: str = Form(""),
                        port: int = Form(0), database: str = Form(""), username: str = Form(""),
-                       password: str = Form(""), user: models.User = Depends(require_login),
+                       password: str = Form(""), user: models.User = Depends(require_role("editor")),
                        db: Session = Depends(get_db)):
     conn = db.get(models.Connection, conn_id)
+    check_owner(conn, user)
     conn.name, conn.engine, conn.host = name, engine, host
     conn.port, conn.database, conn.username = int(port or 0), database, username
     if password:
@@ -231,8 +247,9 @@ def connection_update(conn_id: int, name: str = Form(...), engine: str = Form(..
 
 
 @router.post("/connections/{conn_id}/test")
-def connection_test(conn_id: int, user: models.User = Depends(require_login), db: Session = Depends(get_db)):
+def connection_test(conn_id: int, user: models.User = Depends(require_role("editor")), db: Session = Depends(get_db)):
     conn = db.get(models.Connection, conn_id)
+    check_owner(conn, user)
     result = connections_service.test_connection(conn)
     connections_service.record_test_result(db, conn, result)
     if result.get("ok"):
@@ -241,14 +258,15 @@ def connection_test(conn_id: int, user: models.User = Depends(require_login), db
 
 
 @router.post("/connections/{conn_id}/delete")
-def connection_delete(conn_id: int, user: models.User = Depends(require_login), db: Session = Depends(get_db)):
+def connection_delete(conn_id: int, user: models.User = Depends(require_role("editor")), db: Session = Depends(get_db)):
+    conn = db.get(models.Connection, conn_id)
+    check_owner(conn, user)
     in_use = db.query(models.ValidationConfig).filter(
         (models.ValidationConfig.source_connection_id == conn_id)
         | (models.ValidationConfig.target_connection_id == conn_id)
     ).count()
     if in_use:
         return RedirectResponse(url="/connections?error=Koneksi dipakai config, tidak bisa dihapus", status_code=303)
-    conn = db.get(models.Connection, conn_id)
     db.delete(conn)
     db.commit()
     return RedirectResponse(url="/connections?ok=Koneksi dihapus", status_code=303)
@@ -257,7 +275,9 @@ def connection_delete(conn_id: int, user: models.User = Depends(require_login), 
 # -------------------------------------------------------------------- configs
 @router.get("/configs", response_class=HTMLResponse)
 def configs_list(request: Request, user: models.User = Depends(require_login), db: Session = Depends(get_db)):
-    configs = db.query(models.ValidationConfig).filter_by(is_archived=False).order_by(models.ValidationConfig.name).all()
+    configs = scope_query(db.query(models.ValidationConfig), models.ValidationConfig, user).filter_by(
+        is_archived=False
+    ).order_by(models.ValidationConfig.name).all()
     last_runs = {}
     for c in configs:
         r = db.query(models.Run).filter_by(config_id=c.id).order_by(desc(models.Run.id)).first()
@@ -269,8 +289,8 @@ def configs_list(request: Request, user: models.User = Depends(require_login), d
 
 
 @router.get("/configs/new", response_class=HTMLResponse)
-def config_new_form(request: Request, user: models.User = Depends(require_login), db: Session = Depends(get_db)):
-    conns = db.query(models.Connection).order_by(models.Connection.name).all()
+def config_new_form(request: Request, user: models.User = Depends(require_role("editor")), db: Session = Depends(get_db)):
+    conns = scope_query(db.query(models.Connection), models.Connection, user).order_by(models.Connection.name).all()
     return templates.TemplateResponse(request, "config_form.html", {
         "request": request, "user": user, "active": "configs", "connections": conns,
     })
@@ -279,7 +299,7 @@ def config_new_form(request: Request, user: models.User = Depends(require_login)
 @router.post("/configs")
 def config_create(name: str = Form(...), description: str = Form(""), source_connection_id: int = Form(...),
                    target_connection_id: int = Form(...), default_mode: str = Form("tiered"),
-                   user: models.User = Depends(require_login), db: Session = Depends(get_db)):
+                   user: models.User = Depends(require_role("editor")), db: Session = Depends(get_db)):
     # `name` has a UNIQUE constraint (models.ValidationConfig) -- checked here
     # explicitly rather than catching the resulting IntegrityError, so a
     # duplicate name is a normal flash-error redirect back to the form
@@ -290,7 +310,14 @@ def config_create(name: str = Form(...), description: str = Form(""), source_con
         return RedirectResponse(
             url=f"/configs/new?error=Nama config \"{name}\" sudah dipakai, pilih nama lain", status_code=303,
         )
+    # Referenced connections must belong to this user (or user is admin) --
+    # otherwise a tampered form could wire a config to someone else's connection.
+    src_conn = db.get(models.Connection, int(source_connection_id))
+    tgt_conn = db.get(models.Connection, int(target_connection_id))
+    check_owner(src_conn, user)
+    check_owner(tgt_conn, user)
     cfg = models.ValidationConfig(
+        owner_id=user.id,
         name=name, description=description,
         source_connection_id=int(source_connection_id), target_connection_id=int(target_connection_id),
         default_mode=default_mode,
@@ -301,11 +328,12 @@ def config_create(name: str = Form(...), description: str = Form(""), source_con
     return RedirectResponse(url=f"/configs/{cfg.id}?ok=Config dibuat — lanjutkan pemetaan tabel", status_code=303)
 
 
-def _other_configs(db: Session, config_id: int) -> list[models.ValidationConfig]:
-    """Other active configs, for the 'copy mapping from' dropdown."""
+def _other_configs(db: Session, config_id: int, user: models.User) -> list[models.ValidationConfig]:
+    """Other active configs (this user's own, or all if admin), for the
+    'copy mapping from' dropdown."""
+    q = scope_query(db.query(models.ValidationConfig), models.ValidationConfig, user)
     return (
-        db.query(models.ValidationConfig)
-        .filter(models.ValidationConfig.id != config_id, models.ValidationConfig.is_archived == False)  # noqa: E712
+        q.filter(models.ValidationConfig.id != config_id, models.ValidationConfig.is_archived == False)  # noqa: E712
         .order_by(models.ValidationConfig.name).all()
     )
 
@@ -323,19 +351,23 @@ def _table_columns_for(cfg: models.ValidationConfig, tables, suggestions: list[d
 def config_detail(config_id: int, request: Request, user: models.User = Depends(require_login),
                    db: Session = Depends(get_db)):
     cfg = db.get(models.ValidationConfig, config_id)
-    runs = db.query(models.Run).filter_by(config_id=config_id).order_by(desc(models.Run.id)).limit(20).all()
+    check_owner(cfg, user)
+    runs = scope_query(db.query(models.Run), models.Run, user).filter_by(
+        config_id=config_id
+    ).order_by(desc(models.Run.id)).limit(20).all()
     return templates.TemplateResponse(request, "config_detail.html", {
         "request": request, "user": user, "active": "configs",
         "config": cfg, "tables": cfg.tables, "runs": runs, "suggestions": [],
-        "configs_for_copy": _other_configs(db, config_id),
+        "configs_for_copy": _other_configs(db, config_id, user),
         "table_columns": _table_columns_for(cfg, cfg.tables, []),
     })
 
 
 @router.post("/configs/{config_id}/suggest", response_class=HTMLResponse)
 def config_suggest(config_id: int, request: Request, prefix: str = Form(""),
-                    user: models.User = Depends(require_login), db: Session = Depends(get_db)):
+                    user: models.User = Depends(require_role("editor")), db: Session = Depends(get_db)):
     cfg = db.get(models.ValidationConfig, config_id)
+    check_owner(cfg, user)
     existing = {t.source_table for t in cfg.tables}
     all_suggestions = discovery_service.suggest_mappings(cfg.source_connection, cfg.target_connection, prefix)
     suggestions = [s for s in all_suggestions if s["target_table"] and s["source_table"] not in existing]
@@ -343,33 +375,36 @@ def config_suggest(config_id: int, request: Request, prefix: str = Form(""),
     return templates.TemplateResponse(request, "config_detail.html", {
         "request": request, "user": user, "active": "configs",
         "config": cfg, "tables": cfg.tables, "runs": runs, "suggestions": suggestions,
-        "configs_for_copy": _other_configs(db, config_id),
+        "configs_for_copy": _other_configs(db, config_id, user),
         "table_columns": _table_columns_for(cfg, cfg.tables, suggestions),
     })
 
 
 @router.post("/configs/{config_id}/copy-from", response_class=HTMLResponse)
 def config_copy_mappings(config_id: int, request: Request, source_config_id: int = Form(...),
-                          user: models.User = Depends(require_login), db: Session = Depends(get_db)):
+                          user: models.User = Depends(require_role("editor")), db: Session = Depends(get_db)):
     cfg = db.get(models.ValidationConfig, config_id)
+    check_owner(cfg, user)
     other = db.get(models.ValidationConfig, source_config_id)
+    check_owner(other, user)
     existing = {t.source_table for t in cfg.tables}
     suggestions = discovery_service.suggest_from_config(other, existing) if other else []
     runs = db.query(models.Run).filter_by(config_id=config_id).order_by(desc(models.Run.id)).limit(20).all()
     return templates.TemplateResponse(request, "config_detail.html", {
         "request": request, "user": user, "active": "configs",
         "config": cfg, "tables": cfg.tables, "runs": runs, "suggestions": suggestions,
-        "configs_for_copy": _other_configs(db, config_id),
+        "configs_for_copy": _other_configs(db, config_id, user),
         "table_columns": _table_columns_for(cfg, cfg.tables, suggestions),
     })
 
 
 @router.post("/configs/{config_id}/tables")
-async def config_save_tables(config_id: int, request: Request, user: models.User = Depends(require_login),
+async def config_save_tables(config_id: int, request: Request, user: models.User = Depends(require_role("editor")),
                               db: Session = Depends(get_db)):
     form = await request.form()
     rows = _parse_indexed_rows(form)
     cfg = db.get(models.ValidationConfig, config_id)
+    check_owner(cfg, user)
 
     for t in list(cfg.tables):  # replace-all: simplest correct approach at this scale
         db.delete(t)
@@ -397,9 +432,10 @@ async def config_save_tables(config_id: int, request: Request, user: models.User
 
 # ---------------------------------------------------------------------- runs
 @router.post("/configs/{config_id}/run")
-def config_run_now(config_id: int, mode: str = Form(""), user: models.User = Depends(require_login),
+def config_run_now(config_id: int, mode: str = Form(""), user: models.User = Depends(require_role("editor")),
                     db: Session = Depends(get_db)):
     cfg = db.get(models.ValidationConfig, config_id)
+    check_owner(cfg, user)
     run = run_service.create_run(db, cfg, mode=mode or None, trigger_type="manual")
     run_service.start_run_async(run.id)
     return RedirectResponse(url=f"/runs/{run.id}", status_code=303)
@@ -417,6 +453,7 @@ def config_table_status(config_id: int, request: Request, user: models.User = De
     so there was no single place to see "where does every table stand NOW"
     once runs became partial."""
     cfg = db.get(models.ValidationConfig, config_id)
+    check_owner(cfg, user)
     runs = (
         db.query(models.Run).filter_by(config_id=config_id)
         .order_by(desc(models.Run.id)).limit(STATUS_HISTORY_RUNS).all()
@@ -467,8 +504,9 @@ def config_table_status(config_id: int, request: Request, user: models.User = De
 
 @router.post("/configs/{config_id}/rerun-table")
 def config_rerun_table(config_id: int, source_table: str = Form(...),
-                        user: models.User = Depends(require_login), db: Session = Depends(get_db)):
+                        user: models.User = Depends(require_role("editor")), db: Session = Depends(get_db)):
     cfg = db.get(models.ValidationConfig, config_id)
+    check_owner(cfg, user)
     valid = {t.source_table for t in cfg.tables if t.enabled}
     if source_table not in valid:
         return RedirectResponse(
@@ -489,6 +527,7 @@ def config_rerun_table(config_id: int, source_table: str = Form(...),
 @router.get("/runs/{run_id}", response_class=HTMLResponse)
 def run_detail(run_id: int, request: Request, user: models.User = Depends(require_login), db: Session = Depends(get_db)):
     run = db.get(models.Run, run_id)
+    check_owner(run, user)
     run_tables = db.query(models.RunTable).filter_by(run_id=run_id).order_by(models.RunTable.id).all()
     events, _ = bus.get_since(run_id, 0)
     return templates.TemplateResponse(request, "run_detail.html", {
@@ -498,7 +537,10 @@ def run_detail(run_id: int, request: Request, user: models.User = Depends(requir
 
 
 @router.get("/runs/{run_id}/tables-fragment", response_class=HTMLResponse)
-def run_tables_fragment(run_id: int, request: Request, db: Session = Depends(get_db)):
+def run_tables_fragment(run_id: int, request: Request, user: models.User = Depends(require_login),
+                         db: Session = Depends(get_db)):
+    run = db.get(models.Run, run_id)
+    check_owner(run, user)
     run_tables = db.query(models.RunTable).filter_by(run_id=run_id).order_by(models.RunTable.id).all()
     events, _ = bus.get_since(run_id, 0)
     return templates.TemplateResponse(request, "_run_tables_fragment.html", {
@@ -507,7 +549,9 @@ def run_tables_fragment(run_id: int, request: Request, db: Session = Depends(get
 
 
 @router.post("/runs/{run_id}/cancel")
-def run_cancel(run_id: int, user: models.User = Depends(require_login)):
+def run_cancel(run_id: int, user: models.User = Depends(require_role("editor")), db: Session = Depends(get_db)):
+    run = db.get(models.Run, run_id)
+    check_owner(run, user)
     bus.request_cancel(run_id)
     return RedirectResponse(url=f"/runs/{run_id}", status_code=303)
 
@@ -517,8 +561,9 @@ _SCOPE_LABELS = {"all": "semua tabel", "fail": "FAIL", "error": "ERROR", "non_pa
 
 @router.post("/runs/{run_id}/resume")
 def run_resume(run_id: int, scope: str = Form("non_pass"),
-               user: models.User = Depends(require_login), db: Session = Depends(get_db)):
+               user: models.User = Depends(require_role("editor")), db: Session = Depends(get_db)):
     run = db.get(models.Run, run_id)
+    check_owner(run, user)
     new_run = run_service.resume_run(db, run, scope=scope)
     if new_run is None:
         label = _SCOPE_LABELS.get(scope, scope)
@@ -532,6 +577,7 @@ def run_resume(run_id: int, scope: str = Form("non_pass"),
 @router.get("/runs/{run_id}/export.xlsx")
 def run_export(run_id: int, user: models.User = Depends(require_login), db: Session = Depends(get_db)):
     run = db.get(models.Run, run_id)
+    check_owner(run, user)
     path = export_service.export_run_to_excel(db, run)
     return FileResponse(path, filename=path.name,
                          media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
@@ -545,6 +591,7 @@ def table_drilldown(run_id: int, run_table_id: int, request: Request, tab: str =
                      column: str = "", page: int = 1,
                      user: models.User = Depends(require_login), db: Session = Depends(get_db)):
     run = db.get(models.Run, run_id)
+    check_owner(run, user)
     rt = db.get(models.RunTable, run_table_id)
     page = max(1, page)
     agg_findings = [f for f in rt.aggregate_findings if f.category not in ("period_monthly", "period_yearly")]
@@ -650,6 +697,9 @@ def table_drilldown_keys(run_id: int, run_table_id: int, kind: str = "missing_in
     """
     rt = db.get(models.RunTable, run_table_id)
     if rt is None or rt.run_id != run_id:
+        return PlainTextResponse("-- tabel tidak ditemukan", status_code=404)
+    run = db.get(models.Run, run_id)
+    if run is None or (not is_admin(user) and run.owner_id != user.id):
         return PlainTextResponse("-- tabel tidak ditemukan", status_code=404)
 
     FRL = models.FindingRowLevel

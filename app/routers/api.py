@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from .. import models
-from ..auth import require_login
+from ..auth import require_login, require_role, check_owner
 from ..database import get_db
 from ..services import discovery_service
 
@@ -18,12 +18,13 @@ router = APIRouter()
 @router.get("/runs/{run_id}/status")
 def run_status(run_id: int, user: models.User = Depends(require_login), db: Session = Depends(get_db)):
     run = db.get(models.Run, run_id)
+    check_owner(run, user)
     return {"id": run.id, "status": run.status, "summary": run.summary or {}}
 
 
 @router.get("/configs/{config_id}/table-columns")
 def config_table_columns(config_id: int, table: str, side: str = "source",
-                          user: models.User = Depends(require_login), db: Session = Depends(get_db)):
+                          user: models.User = Depends(require_role("editor")), db: Session = Depends(get_db)):
     """Column names for one table on the config's source/target connection —
     used by config_detail.html's JS to turn a freshly-typed table name (in a
     manually-added row) into proper key/chunk/date/exclude dropdowns, the
@@ -31,6 +32,7 @@ def config_table_columns(config_id: int, table: str, side: str = "source",
     cfg = db.get(models.ValidationConfig, config_id)
     if not cfg:
         return {"columns": [], "error": "config not found"}
+    check_owner(cfg, user)
     conn = cfg.target_connection if side == "target" else cfg.source_connection
     if not table:
         return {"columns": []}

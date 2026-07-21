@@ -78,4 +78,27 @@ def init_db() -> None:
             conn.execute(text("ALTER TABLE run_tables ADD COLUMN column_type_details TEXT"))
         if "event_log" not in existing_cols:
             conn.execute(text("ALTER TABLE run_tables ADD COLUMN event_log TEXT"))
+
+        # owner_id backfill (per-user data scoping): added after connections/
+        # validation_configs/runs already had rows with no notion of an owner.
+        # Existing rows get assigned to the (first) admin account so a brand
+        # new non-admin user doesn't see data pre-dating this feature, while
+        # admin retains everything it already had. A no-op on a fresh DB --
+        # there's no admin row yet at this point (bootstrap runs right after
+        # init_db()) and no existing connections/configs/runs to backfill
+        # anyway, so the UPDATE affects zero rows.
+        for table in ("connections", "validation_configs", "runs"):
+            cols = {row[1] for row in conn.execute(text(f"PRAGMA table_info({table})"))}
+            if "owner_id" not in cols:
+                conn.execute(text(f"ALTER TABLE {table} ADD COLUMN owner_id INTEGER"))
+        admin_row = conn.execute(
+            text("SELECT id FROM users WHERE role = 'admin' ORDER BY id LIMIT 1")
+        ).fetchone()
+        if admin_row:
+            admin_id = admin_row[0]
+            for table in ("connections", "validation_configs", "runs"):
+                conn.execute(
+                    text(f"UPDATE {table} SET owner_id = :aid WHERE owner_id IS NULL"),
+                    {"aid": admin_id},
+                )
         conn.commit()
