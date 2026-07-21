@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+{% block title %}Status Tabel — {{ config.name }} — LidValid{% endblock %}
+{% block content %}
+<div class="page-header">
+  <h1>Status Tabel — {{ config.name }}</h1>
+  <span class="grow"></span>
+  <a class="btn" href="/configs/{{ config.id }}">⚙ Config</a>
+</div>
+<p class="subtle">
+  Status TERKINI setiap tabel lintas semua run (bukan cuma run terakhir — run hasil re-run parsial
+  hanya berisi sebagian tabel). Riwayat menampilkan maks. {{ history_limit }} run terakhir per tabel,
+  terbaru di kiri. Klik status untuk membuka detailnya.
+</p>
+
+<div class="grid g4" style="margin-bottom:16px">
+  <div class="card kpi"><div class="lbl">Pass</div><div class="val" style="color:var(--pass)">{{ counts.get('pass', 0) }}</div></div>
+  <div class="card kpi"><div class="lbl">Fail</div><div class="val" style="color:var(--fail)">{{ counts.get('fail', 0) }}</div></div>
+  <div class="card kpi"><div class="lbl">Error</div><div class="val" style="color:var(--err)">{{ counts.get('error', 0) }}</div></div>
+  <div class="card kpi"><div class="lbl">Lainnya / belum pernah run</div><div class="val">{{ (rows|length) - counts.get('pass', 0) - counts.get('fail', 0) - counts.get('error', 0) }}</div></div>
+</div>
+
+<div class="table-wrap"><table class="tbl">
+  <thead><tr><th>Tabel</th><th>Status terkini</th><th>Run</th><th>Selesai</th><th>Riwayat (baru → lama)</th><th></th></tr></thead>
+  <tbody>
+  {% for row in rows %}
+    <tr>
+      <td class="mono">{{ row.source_table }} → {{ row.target_table }}
+        {% if row.removed %}<span class="pill skipped" title="Tabel ini ada di riwayat run tapi sudah dihapus dari config">dihapus dari config</span>
+        {% elif not row.enabled %}<span class="pill skipped">nonaktif</span>{% endif %}
+      </td>
+      <td>
+        {% if row.latest %}
+        <a href="/runs/{{ row.latest.run_id }}/tables/{{ row.latest.id }}" style="text-decoration:none">
+          <span class="pill {{ row.latest.status }}">{{ row.latest.status.upper() }}</span>
+        </a>
+        {% else %}<span class="subtle">belum pernah run</span>{% endif %}
+      </td>
+      <td class="mono">{% if row.latest %}<a href="/runs/{{ row.latest.run_id }}">#{{ row.latest.run_id }}</a>{% else %}—{% endif %}</td>
+      <td class="mono">{{ row.latest.finished_at.strftime('%d/%m %H:%M') if row.latest and row.latest.finished_at else '—' }}</td>
+      <td>
+        {% for h in row.history[:10] %}
+        <a href="/runs/{{ h.run_id }}/tables/{{ h.id }}" title="Run #{{ h.run_id }} — {{ h.status.upper() }}" style="text-decoration:none">
+          <span class="pill {{ h.status }}" style="padding:1px 7px;font-size:10px">{{ h.status[:4].upper() }}</span>
+        </a>
+        {% else %}<span class="subtle">—</span>
+        {% endfor %}
+        {% if row.history|length > 10 %}<span class="subtle">+{{ row.history|length - 10 }}</span>{% endif %}
+      </td>
+      <td>
+        {% if not row.removed and row.enabled %}
+        <form method="post" action="/configs/{{ config.id }}/rerun-table" style="display:inline">
+          <input type="hidden" name="source_table" value="{{ row.source_table }}">
+          <button class="btn sm" type="submit">↻ Re-run</button>
+        </form>
+        {% endif %}
+      </td>
+    </tr>
+  {% else %}
+    <tr><td colspan="6" class="subtle">Config ini belum punya tabel.</td></tr>
+  {% endfor %}
+  </tbody>
+</table></div>
+
+<script>
+// Light auto-refresh while anything is still in flight, so a re-run kicked
+// off from this page visibly progresses without manual reloads.
+(function () {
+  var hasActive = {{ 'true' if (rows | selectattr('latest') | selectattr('latest.status', 'in', ['running', 'pending', 'queued']) | list | length) > 0 else 'false' }};
+  if (hasActive) { setTimeout(function () { window.location.reload(); }, 5000); }
+})();
+</script>
+{% endblock %}
