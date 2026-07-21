@@ -124,6 +124,7 @@ def create_run(
     trigger_type: str = "manual",
 ) -> models.Run:
     run = models.Run(
+        owner_id=config.owner_id,  # inherit from config, not the triggering user (matters if admin runs it)
         config_id=config.id,
         trigger_type=trigger_type,
         mode=mode or config.default_mode,

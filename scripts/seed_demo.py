@@ -99,18 +99,22 @@ def main() -> None:
     init_db()
     db = SessionLocal()
     try:
-        if db.query(models.User).count() == 0:
-            db.add(models.User(
+        admin = db.query(models.User).filter_by(role="admin").order_by(models.User.id).first()
+        if not admin:
+            admin = models.User(
                 email="admin@lidvalid.local",
                 password_hash=security.hash_password("admin123"),
                 display_name="Admin", role="admin",
-            ))
+            )
+            db.add(admin)
             db.commit()
+            db.refresh(admin)
             print("Bootstrap admin created: admin@lidvalid.local / admin123")
 
         source_conn = db.query(models.Connection).filter_by(name="Demo Source (contoh)").first()
         if not source_conn:
             source_conn = models.Connection(
+                owner_id=admin.id,
                 name="Demo Source (contoh)", engine="sqlite", database=str(SRC_PATH), status="ok",
             )
             db.add(source_conn)
@@ -118,6 +122,7 @@ def main() -> None:
         target_conn = db.query(models.Connection).filter_by(name="Demo Target (contoh)").first()
         if not target_conn:
             target_conn = models.Connection(
+                owner_id=admin.id,
                 name="Demo Target (contoh)", engine="sqlite", database=str(TGT_PATH), status="ok",
             )
             db.add(target_conn)
@@ -128,6 +133,7 @@ def main() -> None:
         config = db.query(models.ValidationConfig).filter_by(name="Demo: Contoh Validasi").first()
         if not config:
             config = models.ValidationConfig(
+                owner_id=admin.id,
                 name="Demo: Contoh Validasi",
                 description="Contoh pasangan tabel dengan mismatch sengaja disisipkan, untuk mencoba UI tanpa akses VPN/DB nyata.",
                 source_connection_id=source_conn.id, target_connection_id=target_conn.id,

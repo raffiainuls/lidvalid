@@ -10,5 +10,6 @@ data/exports/
 .env
 uvicorn_*.log
 x
+x.sqlite
 .idea/
 .vscode/

@@ -34,6 +34,7 @@ class User(Base):
 class Connection(Base):
     __tablename__ = "connections"
     id = Column(Integer, primary_key=True)
+    owner_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     name = Column(String(255), unique=True, nullable=False)
     engine = Column(String(30), nullable=False)  # mysql | clickhouse | sqlite
     host = Column(String(255), default="")
@@ -52,6 +53,7 @@ class Connection(Base):
 class ValidationConfig(Base):
     __tablename__ = "validation_configs"
     id = Column(Integer, primary_key=True)
+    owner_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     name = Column(String(255), unique=True, nullable=False)
     description = Column(Text, default="")
     source_connection_id = Column(Integer, ForeignKey("connections.id"), nullable=False)
@@ -89,6 +91,7 @@ class ConfigTable(Base):
 class Run(Base):
     __tablename__ = "runs"
     id = Column(Integer, primary_key=True)
+    owner_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     config_id = Column(Integer, ForeignKey("validation_configs.id"), nullable=False)
     trigger_type = Column(String(20), default="manual")  # manual | schedule | api | revalidate
     mode = Column(String(30), default="tiered")
