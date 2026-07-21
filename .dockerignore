@@ -1,0 +1,13 @@
+.venv/
+.git/
+.pytest_cache/
+__pycache__/
+data/
+tests/
+*.pyc
+.env
+uvicorn_*.log
+x
+x.sqlite
+README.md
+TECHNICAL.md
