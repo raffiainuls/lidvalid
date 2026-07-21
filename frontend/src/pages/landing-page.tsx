@@ -33,6 +33,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
+import { ValidationDemo } from "@/components/landing/validation-demo";
 import { cn } from "@/lib/utils";
 
 function Emphasis({ children }: { children: ReactNode }) {
@@ -526,6 +527,17 @@ export default function LandingPage() {
                 </div>
               </div>
             </div>
+
+            <div className="mt-16 text-center">
+              <Eyebrow>Contoh Nyata</Eyebrow>
+              <h3 className="text-xl font-semibold tracking-tight">Lihat Prosesnya Jalan, Langkah demi Langkah</h3>
+              <p className="mx-auto mt-2 max-w-xl text-sm text-muted-foreground">
+                Tabel contoh di bawah otomatis jalan lewat kelima lapisan di atas — perhatikan
+                angkanya berubah tiap tahap, termasuk metrik statistik yang beda formula per tipe
+                kolom.
+              </p>
+            </div>
+            <ValidationDemo />
           </div>
         </section>
 
