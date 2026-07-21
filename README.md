@@ -1,610 +1,669 @@
 # LidValid
 
-Satu platform web validasi data — gabungan dua tool lama:
+A unified data validation web platform — merging two legacy tools:
 
-- **`validation-data`** ([d:\data-pipeline-batch\validation-data](../../data-pipeline-batch/validation-data)) — validasi agregat/statistik (row count, completeness, uniqueness, statistik kolom, breakdown periode)
-- **`validation_database`** ([d:\Project\validation_database](../validation_database)) — validasi row-level (missing ID dua arah, value diff per-row via chunked-by-id)
+- **`validation-data`** ([d:\data-pipeline-batch\validation-data](../../data-pipeline-batch/validation-data)) — aggregate/statistical validation (row count, completeness, uniqueness, column stats, period breakdown)
+- **`validation_database`** ([d:\Project\validation_database](../validation_database)) — row-level validation (missing IDs both directions, per-row value diff via chunked-by-id)
 
-Ini adalah implementasi kerja dari paket dokumen perencanaan di
+This is the working implementation of the planning document package at
 [`d:\data-pipeline-batch\docs\validation-platform\`](../../data-pipeline-batch/docs/validation-platform/)
-(PRD, arsitektur, data model, API spec, wireframe, roadmap). Baca dokumen itu dulu untuk konteks visi
-lengkap — dokumen ini menjelaskan **apa yang sudah benar-benar berjalan** di implementasi ini.
+(PRD, architecture, data model, API spec, wireframe, roadmap). Read that first for the full vision
+context — this document describes **what actually runs** in this implementation.
 
-> Untuk penjelasan teknis mendalam — arsitektur, alur data, dan pembahasan tiap file/fungsi/baris
-> kode — baca **[TECHNICAL.md](TECHNICAL.md)**. Dokumen ini (README) fokus ke "apa & cara pakai";
-> TECHNICAL.md fokus ke "bagaimana cara kerjanya di dalam".
+> For deep technical explanation — architecture, data flow, and a walkthrough of every
+> file/function/line of code — read **TECHNICAL.md** (kept locally, not part of the git repo/GitHub
+> push). This document (README) focuses on "what & how to use"; TECHNICAL.md focuses on "how it
+> works internally".
 
-Fitur intinya: **Tiered Validation** — jalankan agregat (murah) untuk semua tabel, lalu otomatis
-jalankan row-level (presisi, lebih mahal) hanya untuk tabel yang FAIL. Satu run bisa langsung
-menjawab "tabel mana yang beda" *dan* "row/kolom mana persisnya" tanpa pindah tool.
+Core feature: **Tiered Validation** — run aggregate checks (cheap) for all tables, then
+automatically run row-level checks (precise, more expensive) only for tables that FAIL. One run can
+directly answer both "which tables differ" *and* "which exact rows/columns" without switching tools.
 
-## Coba sekarang (2 menit)
+## Try it now (2 minutes)
 
 ```powershell
-cd d:\Project\lidvalid
+cd D:\Project\validahub   # local folder name hasn't been renamed even though the brand is "LidValid"
 python -m venv .venv
 .venv\Scripts\python.exe -m pip install -r requirements.txt
 
-# buat 2 database SQLite contoh + config + 1 run lengkap, siap dilihat
+# creates 2 sample SQLite databases + a config + 1 complete run, ready to view
 .venv\Scripts\python.exe scripts\seed_demo.py
 
-# jalankan server
+# run the server
 .venv\Scripts\uvicorn app.main:app --reload
 ```
 
-Buka **http://127.0.0.1:8000** → login `admin@lidvalid.local` / `admin123` (dicetak juga di konsol saat
-pertama kali jalan). Config **"Demo: Contoh Validasi"** sudah berisi 1 run selesai — tabel
-`ws_materials` PASS, `ws_orders` FAIL (5 row sengaja dihilangkan + 2 value diff) dengan drilldown
-lengkap sampai ke row & kolom yang beda.
+Open **http://127.0.0.1:8000** → log in with `admin@lidvalid.local` / `admin123` (also printed to
+the console on first run). Config **"Demo: Contoh Validasi"** already has 1 completed run —
+`ws_materials` PASSES, `ws_orders` FAILS (5 rows deliberately dropped + 2 value diffs) with full
+drilldown to the exact row & column that differ.
 
-Untuk memvalidasi data **sungguhan** (MySQL/ClickHouse asli): buat Connection baru di `/connections`
-dengan engine `mysql`/`clickhouse`, lalu buat Config seperti biasa. Server perlu akses jaringan yang
-sama seperti Dagster (VPN ke ClickHouse K8s bila perlu).
+To validate **real** data (actual MySQL/ClickHouse): create a new Connection at `/connections` with
+engine `mysql`/`clickhouse`, then create a Config as usual. The server needs the same network
+access as Dagster (VPN to the ClickHouse K8s if needed) — see §10 in TECHNICAL.md for how this was
+solved for the VPS deployment (SSH reverse tunnel).
 
-## Menjalankan test
+To deploy to a server/VPS (Docker + Caddy + automatic HTTPS), see the **Deployment** section below.
+
+## Running tests
 
 ```powershell
 .venv\Scripts\python.exe -m pytest -v
 ```
 
-40 test, semuanya terhadap SQLite lokal (tidak butuh MySQL/ClickHouse nyata) — mencakup edge-case
-lintas-engine yang di-port dari kedua tool lama (lihat `tests/test_categories.py`,
+155 tests, all against local SQLite (no real MySQL/ClickHouse needed) — covering cross-engine
+edge cases ported from both legacy tools (see `tests/test_categories.py`,
 `tests/test_rowlevel_comparator.py`, `tests/test_aggregate_validator.py`, `tests/test_tiered_runner.py`),
-plus satu regression test (`tests/test_app_run_service.py`) untuk bug threading nyata yang ditemukan
-saat membangun ini — lihat catatan di bawah.
+a regression test (`tests/test_app_run_service.py`) for a real threading bug found while building
+this (see notes below), and `tests/test_rbac.py` for role gating + per-user data scoping (see the
+"RBAC & Data Scoping" section below).
 
-## Struktur
+## Structure
 
 ```
 lidvalid/
-├── README.md             # dokumen ini — apa & cara pakai
-├── TECHNICAL.md           # arsitektur, alur data, penjelasan kode per-file/fungsi/baris
-├── validation_core/      # Engine — port murni Python, tidak tahu web/DB metadata sama sekali
-│   ├── categories.py      # get_category, values_match, META_COLUMNS (fix bug YEAR→UInt16)
-│   ├── models.py           # TableSpec, RunSettings (dataclass biasa)
+├── README.md             # this document — what & how to use
+├── TECHNICAL.md           # architecture, data flow, per-file/function/line code walkthrough (local only, not in git)
+├── validation_core/      # Engine — pure Python port, knows nothing about the web/DB metadata
+│   ├── categories.py      # get_category, values_match, META_COLUMNS (fixes the YEAR→UInt16 bug)
+│   ├── models.py           # TableSpec, RunSettings (plain dataclasses)
 │   ├── events.py           # ProgressEvent
-│   ├── connectors/         # Dialect (mysql/clickhouse/sqlite) + Connector — 1 implementasi 5 report
-│   ├── aggregate/          # AggregateValidator — port db_validator.py (Report 1-5)
-│   ├── rowlevel/           # compare_chunk_multi + RowLevelValidator — port chunked-by-id
-│   ├── runner/             # run_table() — Tiered Validation (aggregate → rowlevel utk FAIL) + retry
-│   └── excel_export.py     # export .xlsx kompatibel format lama (fitur transisi, bukan output utama)
-├── app/                  # FastAPI backend + UI server-rendered
-│   ├── main.py             # entry point, bootstrap admin user
-│   ├── database.py         # SQLAlchemy engine/session (SQLite default)
-│   ├── models.py           # ORM (13 tabel, versi SQLite-friendly dari data-model.md)
-│   ├── security.py         # enkripsi Fernet + hashing password
-│   ├── auth.py             # session auth
-│   ├── services/           # connections/discovery/run/export service — jembatan ORM ↔ validation_core
-│   ├── routers/            # ui.py (halaman + form POST), api.py (JSON polling)
+│   ├── connectors/         # Dialect (mysql/clickhouse/sqlite) + Connector — one implementation, 5 reports
+│   ├── aggregate/          # AggregateValidator — port of db_validator.py (Report 1-5)
+│   ├── rowlevel/           # compare_chunk_multi + RowLevelValidator — port of chunked-by-id
+│   ├── runner/             # run_table() — Tiered Validation (aggregate → rowlevel for FAILs) + retry
+│   └── excel_export.py     # exports .xlsx compatible with the old format (transition feature, not the main output)
+├── app/                  # FastAPI backend + server-rendered UI
+│   ├── main.py             # entry point, admin bootstrap (env-driven in production)
+│   ├── database.py         # SQLAlchemy engine/session (SQLite by default)
+│   ├── models.py           # ORM (13 tables + owner_id per-user scoping, SQLite-friendly version of data-model.md)
+│   ├── security.py         # Fernet encryption + password hashing (env var required in production)
+│   ├── auth.py             # session auth, RBAC (require_role) + data scoping (scope_query/check_owner)
+│   ├── services/           # connections/discovery/run/export services — bridge ORM ↔ validation_core
+│   ├── routers/            # ui.py (pages + form POSTs), api.py (JSON polling) — every route is RBAC-gated
 │   └── templates/          # Jinja2 — dashboard, connections, configs, run detail/report, drilldown
-├── tests/                # pytest — 40 test, semua jalan lokal via SQLite, tanpa DB nyata
-└── scripts/seed_demo.py  # bikin demo end-to-end sekali klik
+├── tests/                # pytest — 155 tests, all run locally against SQLite, no real DB needed
+│   └── test_rbac.py        # role gating + per-user data scoping
+├── scripts/
+│   ├── seed_demo.py         # one-click end-to-end demo generator
+│   └── create_user.py       # create/update accounts (no user-management UI yet)
+├── Dockerfile / .dockerignore
+├── docker-compose.yml     # app + Caddy (auto-HTTPS)
+├── Caddyfile
+└── .env.example           # production env var template
 ```
 
-## Yang sudah nyata jalan
+## What actually works
 
-- **Tiered validation** end-to-end: aggregate 5-report, eskalasi otomatis ke row-level chunked-by-id
-  untuk tabel FAIL, hasil tergabung dalam satu run.
-- **3 engine**: MySQL, ClickHouse (paritas produksi kedua tool lama), plus SQLite (baru — untuk
-  demo/testing lokal tanpa VPN).
-- **Semua edge-case fix dari kedua tool lama dipertahankan** (lihat
-  `docs/validation-platform/01-analisa-existing.md` §2.3 di project asal): floor tanggal pre-1970,
-  `BINARY LOWER(TRIM())` untuk collation MySQL vs ClickHouse, `_ceil_stat` untuk presisi AVG,
-  `toString()` untuk sentinel date, normalisasi `.000`, backtick reserved keyword, `FINAL` untuk
-  ReplacingMergeTree, escaping `%%` khusus MySQL+SQLAlchemy (lihat komentar di
+- **Tiered validation** end-to-end: 5-report aggregate, automatic escalation to row-level
+  chunked-by-id for FAILing tables, results merged into a single run.
+- **3 engines**: MySQL, ClickHouse (production parity with both legacy tools), plus SQLite (new — for
+  local demo/testing without a VPN).
+- **All edge-case fixes from both legacy tools are preserved** (see
+  `docs/validation-platform/01-analisa-existing.md` §2.3 in the source project): pre-1970 date
+  flooring, `BINARY LOWER(TRIM())` for MySQL vs ClickHouse collation, `_ceil_stat` for AVG precision,
+  `toString()` for sentinel dates, `.000` normalization, reserved-keyword backticking, `FINAL` for
+  ReplacingMergeTree, MySQL+SQLAlchemy-specific `%%` escaping (see comments in
   `validation_core/connectors/mysql.py`).
-- **Clamp tanggal 2 arah (floor 1970 + ceiling max ClickHouse) di SEMUA validasi terkait date**:
-  setiap kolom date/timestamp yang dibandingkan (Report 2 uniqueness, Report 3 min/max/datediff,
-  Report 4/5 period breakdown, investigate query) di-floor ke `1970-01-01` DAN di-cap ke batas
-  maksimum yang benar-benar bisa disimpan ClickHouse untuk tipe kolom itu (`Date` → `2149-06-06`,
-  `Date32` → `2299-12-31`, `DateTime` → `2106-02-07 06:28:15`, `DateTime64` → `2299-12-31`) — pada
-  KEDUA sisi perbandingan, bukan cuma sisi yang kebetulan MySQL, supaya nilai yang di luar jangkauan
-  itu (yang di ClickHouse pasti sudah ke-clamp diam-diam saat ingestion) tidak muncul sebagai false
-  mismatch di sisi lain yang masih punya nilai asli. Lihat `validation_core/connectors/clickhouse.py::clickhouse_date_max()`.
-- **1 bug lama diperbaiki**: MySQL `YEAR` sekarang dipetakan ke kategori numeric (dulu fallback ke
-  string, menyebabkan crash `length(UInt16)` di ClickHouse — `validation-data/CLAUDE.md` known issue #1).
-- **Config builder** via web: koneksi terenkripsi (Fernet), pemetaan tabel dengan editor baris
-  (tambah/hapus tanpa reload), auto-suggest mapping by prefix. Import YAML config lama belum ada
-  (lihat tabel "Deviasi dari arsitektur target" di bawah).
-- **Auto-suggest key columns dari DDL (termasuk composite key)**: saat "Auto-suggest dari koneksi"
-  dipakai, `key_columns` otomatis diisi dari PRIMARY KEY tabel (MySQL, lewat
-  `INFORMATION_SCHEMA.KEY_COLUMN_USAGE`) atau sorting key (ClickHouse, lewat
-  `system.tables.sorting_key`) — kalau PK/sorting key-nya composite (mis. `order_id, material_id`),
-  otomatis kepakai sebagai composite key, urutan kolom dijaga sesuai definisi DDL. Fallback ke `id`
-  kalau tidak terdeteksi.
-- **Key/chunk/date/exclude column jadi dropdown, bukan ketik manual**: untuk tabel yang sudah ada di
-  config dan untuk hasil suggestion (auto-suggest maupun salin dari config lain), field "Key
-  columns" & "Exclude" jadi `<select multiple>` (Ctrl+klik untuk pilih lebih dari satu — composite
-  key tinggal klik, bukan ketik dipisah koma) dan "Chunk col"/"Date col" jadi `<select>` — semuanya
-  diisi dari kolom ASLI tabel itu di source connection. Untuk baris yang ditambah manual ("+ Tambah
-  baris"), ada tombol 🔍 di sebelah nama tabel yang memuat daftar kolomnya via AJAX begitu nama
-  tabelnya diketik.
-- **Salin pemetaan tabel dari config lain**: di halaman config, ada dropdown untuk memilih config
-  lain lalu tombol "Salin pemetaan" — menyalin `key_columns`/`chunk_column`/`date_column`/
-  `exclude_columns`/`mode_override` yang sudah pernah diisi untuk tabel yang sama, tabel yang sudah
-  ada di config saat ini dilewati. Hasilnya masuk sebagai baris belum-tersimpan untuk direview dulu
-  sebelum "Simpan Pemetaan Tabel" — bukan langsung menimpa.
-- **Run**: trigger dari UI, eksekusi background (thread pool, konkurensi per-tabel konfigurabel),
-  retry otomatis 3× untuk error transient, cancel, resume (skip tabel yang sudah pass/fail).
-  Progres dipoll tiap 2 detik (lihat "Live progress" di bawah).
-- **Drilldown**: per tabel — Ringkasan, Temuan Agregat, Tipe Kolom (Report 2/3's perbandingan tipe
-  mentah source vs target per kolom, termasuk kolom yang KATEGORI-nya beda — sebelumnya cuma dipakai
-  diam-diam untuk skip stat comparison, sekarang kelihatan), Periode (mismatch saja), Missing Keys,
-  Value Diffs, SQL (semua query yang dieksekusi, untuk audit).
-- **Indikator loading global**: setiap navigasi (klik link, submit form) langsung menampilkan progress
-  bar tipis di atas halaman + tombol submit berubah jadi "⏳ Memuat..." — aplikasi ini full page-reload
-  tanpa SPA, jadi tanpa penanda ini halaman yang lambat (drilldown tabel besar, dll) terlihat sama
-  persis dengan aplikasi yang macet buat user non-teknis.
-- **Export Excel** kompatibel format lama (Summary + sheet temuan per tabel).
-- **Auth** sederhana (session, 1 admin bootstrap otomatis di run pertama).
-- **Dashboard interaktif**: seluruh baris tabel (run terbaru, daftar config, riwayat run, daftar
-  tabel per-run) bisa diklik langsung ke halaman detailnya — bukan cuma teks link kecil. Ada widget
-  tren pass-rate (bar chart dari run-run terakhir) dan "Tabel Paling Bermasalah" (pasangan
-  source/target yang paling sering FAIL/ERROR lintas riwayat run).
-- **Filter kolom di tab Value Diffs**: dropdown berisi semua kolom yang kena value diff + jumlahnya,
-  supaya tidak perlu scroll ratusan baris untuk cek kolom tertentu.
-- **Toleransi presisi angka di row-level value diff**: kolom numerik (float/decimal) dibandingkan
-  dengan toleransi relatif+absolut (mirip `math.isclose`), bukan exact-compare — menghilangkan
-  false-positive akibat dua engine menyerialisasi nilai float yang SAMA dengan presisi desimal
-  berbeda (mis. `482.437346437` vs `482.43734643734643`). Kolom integer murni (tanpa NULL) tetap
-  dibandingkan exact — lihat `validation_core/rowlevel/comparator.py::column_diff_mask`. Berlaku
-  untuk pasangan engine apa pun (MySQL vs ClickHouse, ClickHouse vs ClickHouse, dst) karena
-  perbandingannya bekerja di atas data yang sudah ditarik ke pandas, bukan di level SQL.
+- **Two-way date clamping (floor 1970 + ClickHouse max ceiling) on ALL date-related validation**:
+  every date/timestamp column being compared (Report 2 uniqueness, Report 3 min/max/datediff,
+  Report 4/5 period breakdown, investigate query) is floored to `1970-01-01` AND capped to the actual
+  maximum value ClickHouse can store for that column type (`Date` → `2149-06-06`, `Date32` →
+  `2299-12-31`, `DateTime` → `2106-02-07 06:28:15`, `DateTime64` → `2299-12-31`) — on BOTH sides of
+  the comparison, not just whichever side happens to be MySQL, so out-of-range values (which
+  ClickHouse silently clamps on ingestion anyway) don't show up as a false mismatch against the
+  other side that still has the raw value. See `validation_core/connectors/clickhouse.py::clickhouse_date_max()`.
+- **1 legacy bug fixed**: MySQL `YEAR` is now mapped to the numeric category (previously fell back to
+  string, causing a `length(UInt16)` crash in ClickHouse — `validation-data/CLAUDE.md` known issue #1).
+- **Config builder** via the web: encrypted connections (Fernet), table mapping with a row editor
+  (add/remove without reload), auto-suggest mapping by prefix. Importing legacy YAML configs isn't
+  implemented yet (see the "Deviations from the target architecture" table below).
+- **Auto-suggest key columns from the DDL (including composite keys)**: when "Auto-suggest from
+  connection" is used, `key_columns` is automatically filled from the table's PRIMARY KEY (MySQL, via
+  `INFORMATION_SCHEMA.KEY_COLUMN_USAGE`) or sorting key (ClickHouse, via `system.tables.sorting_key`)
+  — if the PK/sorting key is composite (e.g. `order_id, material_id`), it's automatically used as a
+  composite key, preserving the DDL's column order. Falls back to `id` if nothing is detected.
+- **Key/chunk/date/exclude columns as dropdowns, not manual typing**: for tables already in a config
+  and for suggestion results (auto-suggest or copied from another config), the "Key columns" &
+  "Exclude" fields become `<select multiple>` (Ctrl+click to pick more than one — composite keys are
+  a click away, not comma-typed) and "Chunk col"/"Date col" become `<select>` — all populated from
+  the ACTUAL columns of that table on the source connection. For manually-added rows ("+ Add row"),
+  a 🔍 button next to the table name loads its column list via AJAX as soon as the table name is
+  typed.
+- **Copy table mappings from another config**: on the config page, a dropdown lets you pick another
+  config, then a "Copy mapping" button — copies `key_columns`/`chunk_column`/`date_column`/
+  `exclude_columns`/`mode_override` that were already filled in for the same table, skipping tables
+  already present in the current config. Results land as unsaved rows for review before "Save Table
+  Mapping" — not an immediate overwrite.
+- **Runs**: triggered from the UI, background execution (thread pool, configurable per-table
+  concurrency), automatic 3× retry for transient errors, cancel, resume (skip tables already
+  passed/failed). Progress is polled every 2 seconds (see "Live progress" below).
+- **Drilldown**: per table — Summary, Aggregate Findings, Column Types (Report 2/3's raw source-vs-target
+  type comparison per column, including columns whose CATEGORY differs — previously only used
+  silently to skip stat comparison, now visible), Period (mismatches only), Missing Keys,
+  Value Diffs, SQL (every query executed, for audit).
+- **Global loading indicator**: every navigation (link click, form submit) immediately shows a thin
+  progress bar at the top of the page + the submit button turns into "⏳ Loading..." — this app is
+  full page-reload, no SPA, so without this marker a slow page (large table drilldown, etc.) looks
+  identical to a hung app to non-technical users.
+- **Excel export** compatible with the legacy format (Summary + one findings sheet per table).
+- **Auth + RBAC**: session cookie, 3 roles (admin/editor/viewer) ENFORCED on every route (not just
+  recorded) — viewer reads only, editor manages their own data, admin sees/manages everyone's. See
+  the "RBAC & Data Scoping" section below for the full matrix.
+- **Per-user data scoping**: Connections, Configs, and Runs each have an owner — new users do NOT
+  see other users' data by default; admins see everything.
+- **Interactive dashboard**: every table row (recent runs, config list, run history, per-run table
+  list) is clickable straight to its detail page — not just a small text link. Includes a pass-rate
+  trend widget (bar chart of the last few runs) and "Most Problematic Tables" (source/target pairs
+  that FAIL/ERROR most often across run history).
+- **Column filter on the Value Diffs tab**: a dropdown listing every column with a value diff plus
+  its count, so you don't have to scroll hundreds of rows to check a specific column.
+- **Numeric precision tolerance in row-level value diffs**: numeric (float/decimal) columns are
+  compared with a relative+absolute tolerance (similar to `math.isclose`), not exact comparison —
+  eliminating false positives from two engines serializing the SAME float value at different decimal
+  precision (e.g. `482.437346437` vs `482.43734643734643`). Pure integer columns (no NULLs) are still
+  compared exactly — see `validation_core/rowlevel/comparator.py::column_diff_mask`. Applies to any
+  engine pair (MySQL vs ClickHouse, ClickHouse vs ClickHouse, etc.) since the comparison operates on
+  data already pulled into pandas, not at the SQL level.
 
-## Bug nyata yang ditemukan & diperbaiki saat membangun ini
+## Real bugs found & fixed while building this
 
-Saat menjalankan 2 tabel **konkuren** lewat `run_service.py`, salah satu tabel kadang gagal dengan
-`IndexError: tuple index out of range` yang membingungkan (dari dalam kode SQLAlchemy sendiri, bukan
-dari validation_core). Akar masalahnya: kode awal membaca `source_conn.database` dan `run.mode`
-(atribut ORM) dari **dalam worker thread**. SQLAlchemy meng-*expire* semua atribut setelah
-`db.commit()`, jadi baca berikutnya memicu lazy-reload lewat Session yang sama — dan satu `Session`
-tidak aman dipakai bersamaan dari banyak thread. Race ini kadang merusak data row di level cursor.
+While running 2 tables **concurrently** via `run_service.py`, one table would occasionally fail with
+a confusing `IndexError: tuple index out of range` (from inside SQLAlchemy itself, not from
+validation_core). Root cause: the original code read `source_conn.database` and `run.mode` (ORM
+attributes) **from inside the worker thread**. SQLAlchemy expires all attributes after
+`db.commit()`, so the next read triggers a lazy-reload through the same Session — and a single
+`Session` is not safe to use concurrently from multiple threads. This race occasionally corrupted
+row data at the cursor level.
 
-Perbaikannya: semua nilai yang dibutuhkan worker thread (`source_db_name`, `target_db_name`,
-`run_mode`) ditangkap sebagai **string biasa** di thread utama, sebelum thread pool dibuka — worker
-thread sekarang tidak pernah menyentuh objek SQLAlchemy sama sekali, hanya `validation_core` +
-koneksi DB mentah. Regression test-nya ada di `tests/test_app_run_service.py` (menjalankan 4 tabel
-konkuren berulang untuk memastikan racenya benar-benar hilang, bukan cuma "biasanya lolos").
+Fix: every value the worker thread needs (`source_db_name`, `target_db_name`, `run_mode`) is now
+captured as a **plain string** in the main thread, before the thread pool opens — the worker thread
+now never touches a SQLAlchemy object at all, only `validation_core` + raw DB connections.
+Regression test is in `tests/test_app_run_service.py` (runs 4 tables concurrently, repeatedly, to
+confirm the race is truly gone, not just "usually passes").
 
-### Insiden: `database is locked` — Internal Server Error saat run panjang berjalan
+### Incident: `database is locked` — Internal Server Error while a long run was in progress
 
-Saat sebuah run **68 tabel ClickHouse asli** berjalan lama (mode `tiered`, jam-an) di background,
-request HTTP LAIN yang cuma butuh baca (mis. cek login) ikut gagal dengan
-`sqlite3.OperationalError: database is locked`. Penyebabnya: SQLite secara default (*rollback
-journal* / mode `DELETE`) mengambil lock EKSKLUSIF atas seluruh file selama transaksi tulis
-berlangsung — commit demi commit dari worker validasi cukup untuk membuat request baca lain
-(halaman mana pun) ikut ter-block sampai timeout driver (5 detik) lalu gagal.
+While a **68 real ClickHouse tables** run (`tiered` mode, hours-long) was running in the background,
+OTHER HTTP requests that only needed to read (e.g. checking login) also failed with
+`sqlite3.OperationalError: database is locked`. Cause: SQLite's default (*rollback journal* /
+`DELETE` mode) takes an EXCLUSIVE lock on the entire file for the duration of a write transaction —
+commit after commit from the validation worker was enough to block other read requests (any page)
+until the driver's timeout (5 seconds), then fail.
 
-**Perbaikan**: `app/database.py` sekarang mengaktifkan **WAL mode** (`PRAGMA journal_mode=WAL`) +
-`busy_timeout=30000` lewat SQLAlchemy connect event — WAL membiarkan pembaca jalan terus SELAGI
-satu penulis aktif (persis pola beban tool ini: banyak baca pendek, satu validasi background yang
-menulis). Sudah diverifikasi lewat test (`tests/test_run_service.py`) yang benar-benar membuka
-transaksi tulis lalu mencoba baca bersamaan — sebelum fix ini gagal, sesudahnya lolos instan.
+**Fix**: `app/database.py` now enables **WAL mode** (`PRAGMA journal_mode=WAL`) +
+`busy_timeout=30000` via a SQLAlchemy connect event — WAL lets readers keep working WHILE one writer
+is active (exactly this tool's workload pattern: many short reads, one background validation
+writer). Verified with a test (`tests/test_run_service.py`) that actually opens a write transaction
+and tries to read concurrently — failed before this fix, passes instantly after.
 
-**Kesalahan tambahan yang terjadi saat investigasi** (dicatat biar tidak terulang): melihat
-`run_tables.progress = 0.0` di database untuk tabel yang sudah berjam-jam berjalan sempat disalah
-tafsir sebagai "proses macet". Padahal `progress` **cuma di-update saat tabel SELESAI**, bukan
-selagi berjalan — jadi tabel yang lagi diproses lambat (menunggu ClickHouse) SELALU tampil
-`progress: 0.0` sampai benar-benar tuntas, sama persis tampilannya dengan tabel yang proses-nya
-sudah mati. Salah baca ini sempat menyebabkan proses server yang SEDANG memvalidasi asli
-dihentikan paksa — pekerjaan komputasi yang sedang berjalan di memory saat itu **hilang, tidak bisa
-di-resume**. Perbaikan pencegahan: `run_service.reap_orphaned_runs()` sekarang dipanggil sekali di
-setiap startup server — kalau ada Run yang statusnya masih `"running"`/`"queued"` padahal proses
-BARU saja mulai (berarti thread pemiliknya sudah mati bersama proses sebelumnya, entah karena
-restart/crash), langsung ditandai `"failed"` dengan pesan jelas alih-alih diam-diam terlihat
-"hidup" selamanya. ***Progress tabel per-chunk yang akurat secara real-time*** sayangnya tetap
-belum ada di database (cuma ada di event bus in-memory, hilang begitu server restart) — item lanjutan
-yang masuk akal untuk fase berikutnya adalah mengalirkan checkpoint chunk ke `run_tables` juga, bukan
-cuma ke event bus, supaya "masih jalan wajar" vs "macet" bisa dibedakan tanpa perlu tebak-tebakan.
+**An additional mistake made during the investigation** (recorded so it isn't repeated): seeing
+`run_tables.progress = 0.0` in the database for a table that had been running for hours was
+initially misread as "the process is stuck." In fact, `progress` is **only updated when a table
+FINISHES**, not while it's running — so a table that's slowly being processed (waiting on
+ClickHouse) ALWAYS shows `progress: 0.0` until it's actually done, looking identical to a table
+whose process has died. This misreading led to a server process that was ACTUALLY validating being
+force-killed — the in-memory computation running at that moment was **lost, with no way to
+resume**. Preventive fix: `run_service.reap_orphaned_runs()` is now called once on every server
+startup — if a Run's status is still `"running"`/`"queued"` even though the process JUST started
+(meaning its owning thread died along with the previous process, whether from a restart/crash), it's
+immediately marked `"failed"` with a clear message instead of silently looking "alive" forever.
+***Accurate real-time per-chunk table progress*** unfortunately still doesn't exist in the database
+(it only lives in the in-memory event bus, lost on server restart) — a reasonable follow-up item for
+a later phase is to also stream chunk checkpoints into `run_tables`, not just the event bus, so
+"still legitimately running" vs. "stuck" can be told apart without guessing.
 
-### Insiden: halaman detail tabel (Value Diffs / Missing Keys) sangat lambat dibuka
+### Incident: table detail page (Value Diffs / Missing Keys) was extremely slow to open
 
-User melaporkan tab "Value Diffs"/tab lain di halaman detail hasil validasi lama banget dibuka.
-Investigasi menemukan **dua penyebab independen yang saling menumpuk**:
+A user reported the "Value Diffs" tab (and others) on the validation result detail page taking ages
+to open. Investigation found **two independent, compounding causes**:
 
-1. **Bug arsitektur (permanen, selalu ada)**: route `table_drilldown` (`app/routers/ui.py`) memuat
-   **SELURUH** relationship `rt.rowlevel_findings` lewat ORM — bisa sampai 10.000-20.000+ baris per
-   tabel (dibatasi `rowlevel_sample_cap`, default 10.000 per jenis finding) — lalu me-render SEMUA
-   baris itu jadi `<tr>` HTML dalam SATU response, dan ini terjadi di SETIAP tab dibuka (termasuk tab
-   "Ringkasan" yang sama sekali tidak menampilkan data itu). Contoh nyata: tabel
-   `dashboard_delivery_time` di database production punya 20.117 baris value-diff.
-2. **Kontensi resource (kondisional, saat itu terjadi)**: pada saat dilaporkan, ada run 68 tabel
-   ClickHouse asli (config "All table datamart") yang sedang aktif berjalan di proses server yang
-   SAMA — proses uvicorn memakai ~12,9 GB RAM (dari total 22GB sistem, sisa cuma ~2,7GB free), pola
-   yang sama dengan insiden OOM yang pernah ditangani sebelumnya (lihat commit
-   `dashbaord_stock_sufficiency_monthly`). Dibuktikan langsung: request test ke tab Value Diffs untuk
-   tabel di atas makan waktu **lebih dari 5 menit** sebelum akhirnya dihentikan paksa — dibandingkan
-   query DB murni untuk baca 20 ribu baris findings itu sendiri yang cuma 0,3 detik saat server idle.
+1. **Architectural bug (permanent, always present)**: the `table_drilldown` route
+   (`app/routers/ui.py`) loaded the **ENTIRE** `rt.rowlevel_findings` relationship via the ORM — up
+   to 10,000-20,000+ rows per table (bounded by `rowlevel_sample_cap`, default 10,000 per finding
+   type) — then rendered ALL of those rows as `<tr>` HTML in a SINGLE response, and this happened on
+   EVERY tab open (including the "Summary" tab, which doesn't display that data at all). Real
+   example: the `dashboard_delivery_time` table in the production database has 20,117 value-diff
+   rows.
+2. **Resource contention (conditional, happened to be occurring at the time)**: at the time it was
+   reported, a 68-table real ClickHouse run (config "All table datamart") was actively running on
+   the SAME server process — the uvicorn process was using ~12.9 GB of RAM (out of 22 GB system
+   total, only ~2.7 GB free left), the same pattern as a previously-handled OOM incident (see commit
+   `dashbaord_stock_sufficiency_monthly`). Directly demonstrated: a test request to the Value Diffs
+   tab for the table above took **over 5 minutes** before being force-stopped — compared to a plain
+   DB query to read those same 20 thousand findings rows taking just 0.3 seconds on an idle server.
 
-**Perbaikan (untuk bug #1)**: `table_drilldown` sekarang HANYA menghitung COUNT/`GROUP BY` (murah,
-tidak menghidrasi objek ORM) untuk badge jumlah di setiap tab, dan HANYA mengambil satu HALAMAN (200
-baris) findings sungguhan untuk tab yang SEDANG dibuka — tab lain tidak menyentuh tabel
-`findings_rowlevel` sama sekali. Ditambahkan juga index komposit
-`ix_findings_rowlevel_run_table_type` pada `(run_table_id, finding_type)` (kolom yang selalu dipakai
-di `WHERE`) — sebelumnya tabel ini (120 ribuan baris dan terus tumbuh) di-scan penuh tanpa index sama
-sekali. Karena `init_db()` cuma `create_all()` (tidak ada Alembic/migration di project ini,
-`create_all` tidak pernah mengubah tabel yang sudah ada), index ini di-backfill lewat
-`CREATE INDEX IF NOT EXISTS` eksplisit di `app/database.py` — aman dijalankan berkali-kali, no-op
-kalau sudah ada. Regression test-nya di `tests/test_table_drilldown.py`.
+**Fix (for bug #1)**: `table_drilldown` now ONLY computes COUNT/`GROUP BY` (cheap, doesn't hydrate
+ORM objects) for the count badge on each tab, and ONLY fetches ONE PAGE (200 rows) of actual findings
+for whichever tab is CURRENTLY open — other tabs never touch the `findings_rowlevel` table at all.
+Also added a composite index `ix_findings_rowlevel_run_table_type` on `(run_table_id, finding_type)`
+(the columns always used in `WHERE`) — previously this table (120-thousand-plus rows and growing)
+was fully scanned with no index at all. Since `init_db()` only does `create_all()` (no
+Alembic/migrations in this project, and `create_all` never alters an existing table), this index is
+backfilled via an explicit `CREATE INDEX IF NOT EXISTS` in `app/database.py` — safe to run repeatedly,
+a no-op if it already exists. Regression test is in `tests/test_table_drilldown.py`.
 
-**Bug #2 (kontensi resource) belum diperbaiki** — butuh investigasi terpisah tentang kenapa satu run
-68 tabel bisa memakai ~13GB RAM (kandidat: ukuran chunk per tabel, tidak ada limit memory per worker,
-DataFrame pandas yang tidak dilepas setelah tabel selesai) sebelum bisa diputuskan perbaikannya.
+**Bug #2 (resource contention) has not been fixed** — needs a separate investigation into why a
+single 68-table run can use ~13GB of RAM (candidates: per-table chunk size, no per-worker memory
+limit, pandas DataFrames not released after a table finishes) before a fix can be decided.
 
-### Insiden: tombol "Cancel" tidak menghentikan run yang sedang jalan
+### Incident: the "Cancel" button didn't stop a running run
 
-User melaporkan run yang sudah diklik Cancel tetap jalan terus. Penyebabnya ada di
-`run_service.py::_execute_run()`: SEMUA tabel di-submit ke `ThreadPoolExecutor` di awal (non-blocking,
-selesai dalam hitungan milidetik meski ada 68 tabel), lalu kode menunggu lewat
-`as_completed(futures)` — yang **BLOCKING sampai SETIAP future selesai**, tanpa peduli status cancel
-sama sekali. Flag cancel (`bus.is_cancel_requested()`) cuma dicek di 2 tempat: (1) sebelum submit
-tiap tabel — window ini sudah lama tertutup begitu run berjalan beberapa menit, karena submit tidak
-menunggu apa pun; dan (2) SETELAH `as_completed()` return — yaitu setelah SEMUA tabel selesai,
-membuat pengecekan itu tidak berguna. `validation_core` sendiri juga tidak punya checkpoint
-cancellation di dalam loop chunk-nya, jadi tabel yang SEDANG diproses memang tidak bisa dihentikan
-paksa di tengah jalan (ThreadPoolExecutor tidak bisa membunuh thread yang sudah berjalan).
+A user reported that a run they'd clicked Cancel on kept running anyway. Root cause was in
+`run_service.py::_execute_run()`: ALL tables are submitted to a `ThreadPoolExecutor` up front
+(non-blocking, finishes in milliseconds even with 68 tables), then the code waits via
+`as_completed(futures)` — which **BLOCKS until EVERY future is done**, regardless of cancel status.
+The cancel flag (`bus.is_cancel_requested()`) was only checked in 2 places: (1) before submitting
+each table — this window closes almost immediately once a run has been going for a few minutes,
+since submitting doesn't wait on anything; and (2) AFTER `as_completed()` returns — i.e. after ALL
+tables finish, making that check useless. `validation_core` itself also has no cancellation
+checkpoint inside its chunk loop, so a table that's ACTIVELY being processed genuinely can't be
+force-stopped mid-flight (a `ThreadPoolExecutor` can't kill a thread that's already running).
 
-**Perbaikan**: cek flag cancel dipindah ke DALAM loop `as_completed`, dan begitu pertama kali
-terdeteksi, panggil `future.cancel()` untuk SEMUA future — ini cuma berhasil untuk tabel yang
-BELUM mulai dieksekusi (masih antre di belakang batch yang sedang jalan, dibatasi
-`table_concurrency`). Tabel yang sudah mulai tetap harus selesai secara alami (tidak bisa dipaksa
-berhenti), tapi semua yang masih antre langsung dilewati alih-alih ditunggu — mengubah "tunggu semua
-68 tabel selesai" jadi "tunggu cuma batch yang sedang jalan (biasanya `table_concurrency`, default 4)
-selesai". Regression test-nya di `tests/test_run_cancel.py` (mem-fake `vc_run_table` supaya lambat
-tanpa perlu data sungguhan, lalu memverifikasi run berhenti jauh lebih cepat daripada durasi semua
-tabel, dan tabel yang belum sempat jalan benar-benar berstatus `cancelled` bukan `pass`).
+**Fix**: the cancel-flag check moved INSIDE the `as_completed` loop, and the first time it's
+detected, `future.cancel()` is called on EVERY future — this only succeeds for tables that HAVEN'T
+started executing yet (still queued behind the currently-running batch, bounded by
+`table_concurrency`). Tables that already started must still finish naturally (can't be forced to
+stop), but everything still queued is now skipped immediately instead of waited on — turning "wait
+for all 68 tables to finish" into "wait only for the currently-running batch (usually
+`table_concurrency`, default 4) to finish." Regression test is in `tests/test_run_cancel.py` (fakes
+`vc_run_table` to be slow without needing real data, then verifies the run finishes much faster than
+the full duration of all tables, and that tables which never got to run are genuinely `cancelled`,
+not `pass`).
 
-**Bug KEDUA yang ketemu saat mengetes perbaikan di atas**: begitu Cancel beneran punya efek, jalur
-kode LAMA yang menangani "tabel yang belum sempat di-submit sama sekali ke executor" (relevan kalau
-cancel diminta SEBELUM tabel manapun mulai jalan) ternyata sudah lama rusak juga, cuma tidak pernah
-ketahuan karena sebelumnya Cancel nyaris tidak pernah benar-benar berefek. Baris
-`run.summary = _summarize_run(run_tables, db)` memanggil `db.refresh(rt)` PER TABEL — tapi flip
-status ke `"cancelled"` yang baru saja dilakukan di blok cleanup SEBELUMNYA belum di-commit, jadi
-`refresh()` diam-diam MEMBUANG perubahan itu dan memuat ulang status LAMA (`"running"`) dari
-database. Hasilnya: run selesai dengan status `"cancelled"`, tapi SEMUA tabelnya tetap tertulis
-`"running"` selamanya — persis pola bug yang sudah pernah dicatat & dihindari di
-`reap_orphaned_runs()` (lihat komentarnya), cuma terlewat di sini. Perbaikan: `_summarize_run()`
-TIDAK PERLU `db.refresh(rt)` sama sekali — objek `run_tables` yang diterimanya SUDAH up-to-date
-di memory (baik dari loop `as_completed` maupun cleanup fallback), refresh di situ cuma berisiko,
-tidak pernah perlu. Regression test khusus (deterministik, tidak bergantung timing):
-`tests/test_run_cancel.py::test_cancel_before_any_table_starts_marks_everything_cancelled` — minta
-cancel SEBELUM `start_run_async` dipanggil sama sekali, supaya jalur "belum sempat submit" ini SELALU
-kena, bukan cuma kadang-kadang tergantung seberapa cepat scheduler OS kebetulan jalan.
+**A SECOND bug found while testing the fix above**: once Cancel actually had an effect, the OLD code
+path handling "tables that were never submitted to the executor at all" (relevant when cancel is
+requested BEFORE any table starts running) turned out to have been broken for a long time too, just
+never noticed because Cancel previously almost never had any real effect. The line
+`run.summary = _summarize_run(run_tables, db)` calls `db.refresh(rt)` PER TABLE — but the flip to
+`"cancelled"` status just done in the PREVIOUS cleanup block hadn't been committed yet, so
+`refresh()` silently DISCARDED that change and reloaded the OLD status (`"running"`) from the
+database. Result: the run finished with status `"cancelled"`, but ALL its tables were left showing
+`"running"` forever — exactly the bug pattern already documented and avoided in
+`reap_orphaned_runs()` (see its comments), just missed here. Fix: `_summarize_run()` does NOT need
+`db.refresh(rt)` at all — the `run_tables` objects it receives are ALREADY up to date in memory
+(whether from the `as_completed` loop or the cleanup fallback), refreshing there is only ever risky,
+never necessary. Dedicated regression test (deterministic, not timing-dependent):
+`tests/test_run_cancel.py::test_cancel_before_any_table_starts_marks_everything_cancelled` —
+requests cancel BEFORE `start_run_async` is even called, so this "never got to submit" path is
+ALWAYS hit, not just sometimes depending on how fast the OS scheduler happens to run.
 
-### Insiden: `deleted_at` (NULL di kedua sisi) terdeteksi mismatch — floor tanggal ternyata merusak NULL
+### Incident: `deleted_at` (NULL on both sides) detected as a mismatch — date flooring was corrupting NULLs
 
-User melaporkan (dengan screenshot run production sungguhan): kolom `deleted_at` yang NULL di KEDUA
-sisi (source & target) tetap muncul sebagai mismatch di tab Temuan Agregat — `min`/`max` menunjukkan
-source `None` (benar, NULL) tapi target `1970-01-01 00:00:00.000` (SALAH — harusnya juga `None`), dan
-`uniqueness` beda (`0.0` vs `0.1667`).
+A user reported (with a screenshot of a real production run): a `deleted_at` column that's NULL on
+BOTH sides (source & target) still showed up as a mismatch on the Aggregate Findings tab —
+`min`/`max` showed source `None` (correct, NULL) but target `1970-01-01 00:00:00.000` (WRONG —
+should also be `None`), and `uniqueness` differed (`0.0` vs `0.1667`).
 
-Penyebabnya persis di fix clamp tanggal yang baru ditambahkan (lihat bagian "Yang sudah nyata jalan"):
-`ClickHouseDialect.date_floor_1970()` membungkus kolom dengan `greatest(expr, toDateTime('1970-01-01
-00:00:00'))`. Sejak **ClickHouse 24.12**, `greatest()`/`least()` **MENGABAIKAN argumen NULL** (kalau
-salah satu argumen NULL, hasilnya adalah argumen yang LAIN — bukan NULL) — kebalikan dari
-MySQL/SQLite yang benar mengikuti standar SQL (`GREATEST(NULL, x)` = `NULL`). Akibatnya:
-`greatest(NULL, toDateTime('1970-01-01 00:00:00'))` di ClickHouse mengembalikan `1970-01-01
-00:00:00`, BUKAN `NULL` — NULL asli diam-diam diubah jadi tanggal floor, merusak `MIN()`/`MAX()` (yang
-sekarang menghitung nilai palsu, bukan mengabaikannya seperti NULL asli) dan `COUNT(DISTINCT ...)`
-(yang jadi menghitung 1 nilai distinct tambahan yang seharusnya tidak ada, karena `COUNT(DISTINCT)`
-memang mengabaikan NULL — begitu NULL "disamarkan" jadi nilai konkret, ia ikut terhitung).
+The cause was exactly in the date-clamping fix just added (see "What actually works"):
+`ClickHouseDialect.date_floor_1970()` wraps the column with `greatest(expr, toDateTime('1970-01-01
+00:00:00'))`. Since **ClickHouse 24.12**, `greatest()`/`least()` **IGNORE NULL arguments** (if one
+argument is NULL, the result is the OTHER argument — not NULL) — the opposite of MySQL/SQLite, which
+correctly follow the SQL standard (`GREATEST(NULL, x)` = `NULL`). As a result:
+`greatest(NULL, toDateTime('1970-01-01 00:00:00'))` in ClickHouse returns `1970-01-01 00:00:00`, NOT
+`NULL` — a genuine NULL was silently turned into the floor date, corrupting `MIN()`/`MAX()` (which
+now compute a fake value instead of ignoring it like a real NULL) and `COUNT(DISTINCT ...)` (which
+now counts one extra distinct value that shouldn't exist, since `COUNT(DISTINCT)` normally ignores
+NULL — once the NULL is "disguised" as a concrete value, it gets counted).
 
-**Diverifikasi langsung ke ClickHouse production** (bukan cuma dugaan) — query pembanding pada
-`raw_ws_orders` (3.331.669 baris): ekspresi LAMA (`greatest` polos) mengembalikan **0 NULL** meski
-**3.331.100 baris genuinely NULL** di kolom itu; ekspresi BARU (dengan guard) mengembalikan **persis
-3.331.100 NULL** — cocok 100% dengan jumlah NULL asli.
+**Directly verified against production ClickHouse** (not just a guess) — a comparison query on
+`raw_ws_orders` (3,331,669 rows): the OLD expression (plain `greatest`) returned **0 NULLs** even
+though **3,331,100 rows are genuinely NULL** in that column; the NEW expression (with the guard)
+returns **exactly 3,331,100 NULLs** — a 100% match with the real NULL count.
 
-**Perbaikan**: bungkus `greatest`/`least` dengan `if(isNull(expr), NULL, ...)` di
-`ClickHouseDialect.date_floor_1970()`/`date_ceiling()` — secara eksplisit menegaskan ulang semantik
-NULL alih-alih bergantung pada versi ClickHouse yang kebetulan dipakai (perilaku ini SUDAH pernah
-berubah sekali sebelumnya di 24.12, bisa berubah lagi). MySQL/SQLite tidak perlu perubahan — versi
-`GREATEST`/`MAX` scalar mereka memang sudah benar dari awal. Regression test:
-`tests/test_connectors.py::TestDialectDateClamping` (menguji bentuk SQL persis, termasuk guard
-`if(isNull(...))`-nya).
+**Fix**: wrap `greatest`/`least` with `if(isNull(expr), NULL, ...)` in
+`ClickHouseDialect.date_floor_1970()`/`date_ceiling()` — explicitly re-asserting NULL semantics
+instead of depending on whichever ClickHouse version happens to be in use (this behavior HAS already
+changed once before, in 24.12, and could change again). MySQL/SQLite need no changes — their scalar
+`GREATEST`/`MAX` were already correct from the start. Regression test:
+`tests/test_connectors.py::TestDialectDateClamping` (tests the exact SQL shape, including the
+`if(isNull(...))` guard).
 
-### Insiden: Internal Server Error saat membuat config dengan nama yang sudah dipakai
+### Incident: Internal Server Error when creating a config with a name already in use
 
-User melaporkan Internal Server Error saat membuat config baru. Log server menunjukkan
-`sqlalchemy.exc.IntegrityError: UNIQUE constraint failed: validation_configs.name` — route
-`config_create()` (`app/routers/ui.py`) langsung `db.add()` + `db.commit()` tanpa cek dulu apakah
-nama config itu sudah dipakai (`ValidationConfig.name` punya `unique=True`), jadi begitu ada
-duplikat, exception dari database mental sebagai 500 mentah alih-alih pesan error yang jelas.
-**Perbaikan**: cek `db.query(...).filter_by(name=name).first()` DULU sebelum insert (pola yang sama
-seperti `connection_delete()` sudah pakai untuk kasus serupa) — kalau nama sudah ada, redirect balik
-ke form dengan flash error "Nama config sudah dipakai, pilih nama lain", bukan crash.
+A user reported an Internal Server Error while creating a new config. The server log showed
+`sqlalchemy.exc.IntegrityError: UNIQUE constraint failed: validation_configs.name` — the
+`config_create()` route (`app/routers/ui.py`) called `db.add()` + `db.commit()` directly without
+first checking whether the config name was already in use (`ValidationConfig.name` has
+`unique=True`), so on a duplicate, the database exception bubbled up as a raw 500 instead of a clear
+error message. **Fix**: check `db.query(...).filter_by(name=name).first()` FIRST before inserting
+(the same pattern `connection_delete()` already uses for a similar case) — if the name already
+exists, redirect back to the form with a flash error "Config name already in use, pick another
+name," instead of crashing.
 
-### Perubahan perilaku: Tier 2 yang bersih total sekarang meng-override FAIL palsu dari Tier 1
+### Behavior change: a fully-clean Tier 2 now overrides a false Tier 1 FAIL
 
-Diminta user langsung setelah insiden `deleted_at`/NULL di atas: kalau Tier 1 (aggregate stats)
-menunjukkan mismatch tapi Tier 2 (row-level, lebih presisi — bandingkan per baris) menemukan **NOL**
-missing key DAN **NOL** differing value, tabel itu seharusnya PASS, bukan tetap FAIL. Sebelumnya,
-`validation_core/runner/tiered.py::run_table()` memperlakukan Tier 2 di mode `tiered` murni sebagai
-"drill-down" — begitu Tier 1 bilang FAIL, status TETAP FAIL apa pun hasil Tier 2, row-level cuma
-buat menunjukkan DI MANA letak masalahnya, bukan buat mengoreksi verdict. Ini jadi masalah nyata:
-insiden `deleted_at` di atas MEMBUKTIKAN Tier 1 bisa false-positive (bug versi ClickHouse, presisi
-angka, dll — lihat juga insiden toleransi presisi & floor tanggal sebelumnya), dan kalau Tier 2 sudah
-membuktikan data sebenarnya identik, FAIL yang "menempel" dari Tier 1 jadi alarm palsu yang
-membingungkan.
+Requested by the user right after the `deleted_at`/NULL incident above: if Tier 1 (aggregate stats)
+shows a mismatch but Tier 2 (row-level, more precise — compares row by row) finds **ZERO** missing
+keys AND **ZERO** differing values, the table should PASS, not remain FAIL. Previously,
+`validation_core/runner/tiered.py::run_table()` treated Tier 2 in pure `tiered` mode as a
+"drill-down" — once Tier 1 said FAIL, the status STAYED FAIL no matter what Tier 2 found; row-level
+was only there to show WHERE the problem was, not to correct the verdict. This became a real
+problem: the `deleted_at` incident above PROVED Tier 1 can false-positive (a ClickHouse version bug,
+numeric precision, etc. — see also the earlier precision-tolerance and date-flooring incidents), and
+once Tier 2 has proven the data is actually identical, a FAIL "stuck" from Tier 1 becomes a confusing
+false alarm.
 
-**Perbaikan (versi final, setelah 2 iterasi)**: kalau Tier 2 hasilnya bersih total (0 missing di
-kedua sisi + 0 differing value), status akhir jadi PASS — meng-override FAIL dari Tier 1, di **KEDUA
-mode Tier 2** (`full` maupun `missing`).
+**Fix (final version, after 2 iterations)**: if Tier 2's result is completely clean (0 missing on
+both sides + 0 differing values), the final status becomes PASS — overriding Tier 1's FAIL, in
+**BOTH Tier 2 modes** (`full` and `missing`).
 
-Versi pertama perbaikan ini membatasi override hanya untuk mode `full`, dengan alasan mode `missing`
-(otomatis dipakai tabel besar di atas `full_mode_row_threshold`, 5 juta baris) cuma cek keberadaan
-key dan TIDAK PERNAH membandingkan isi kolom — `differing_values_count == 0` di mode itu trivially
-true, bukan bukti data cocok. Batasan itu langsung kena kasus nyata: `dim_ws_entity_material_activities`
-(71 JUTA baris → otomatis mode `missing`) tetap FAIL meski Tier 2-nya bersih, dan user secara
-eksplisit memutuskan (dua kali): **Tier 2 bersih = PASS, titik, apa pun modenya**. Trade-off yang
-diterima secara sadar: tabel besar yang FAIL Tier 1-nya disebabkan murni oleh perbedaan NILAI kolom
-(bukan baris hilang) sekarang akan terbaca PASS — dianggap layak karena dalam praktiknya Tier 1
-terbukti berkali-kali menghasilkan false positive (insiden NULL→1970, presisi float, dsb), sementara
-kasus "nilai drift tapi jumlah baris persis sama" jauh lebih jarang. Regression test:
-`tests/test_tiered_runner.py::TestTier2OverridesFalsePositiveTier1Fail` (4 skenario: `full`+bersih →
-PASS, `full`+beda nyata → FAIL, `missing`+bersih → PASS, `missing`+ada baris hilang → FAIL).
+The first version of this fix restricted the override to `full` mode only, on the grounds that
+`missing` mode (automatically used for large tables above `full_mode_row_threshold`, 5 million rows)
+only checks key existence and NEVER compares column contents — `differing_values_count == 0` in that
+mode is trivially true, not proof the data matches. That restriction immediately hit a real case:
+`dim_ws_entity_material_activities` (71 MILLION rows → automatically `missing` mode) still FAILed
+even though its Tier 2 was clean, and the user explicitly decided (twice): **Tier 2 clean = PASS,
+period, regardless of mode**. A consciously accepted trade-off: large tables whose Tier 1 FAIL was
+caused purely by column VALUE differences (not missing rows) will now read as PASS — deemed
+acceptable because in practice Tier 1 has repeatedly proven to produce false positives (the
+NULL→1970 incident, float precision, etc.), while the "values drifted but row count is exactly the
+same" case is far rarer. Regression test:
+`tests/test_tiered_runner.py::TestTier2OverridesFalsePositiveTier1Fail` (4 scenarios: `full`+clean →
+PASS, `full`+real difference → FAIL, `missing`+clean → PASS, `missing`+missing rows present → FAIL).
 
-### Fitur: halaman "Status Tabel" per config + re-run per tabel
+### Feature: per-config "Table Status" page + per-table re-run
 
-Masalah usability nyata dari alur re-run parsial: setiap re-run membuat Run BARU yang hanya berisi
-tabel yang di-re-run — jadi tidak ada satu tempat pun yang menunjukkan "posisi terkini SEMUA tabel"
-begitu run mulai parsial; user harus menggabungkan beberapa run di kepala. **Solusi**: halaman
-`/configs/{id}/status` ("Status Tabel", tombolnya ada di halaman config, halaman run, dan drilldown
-tabel) yang menampilkan matriks per-tabel: status TERKINI lintas semua run (bukan cuma run terakhir),
-run mana yang menghasilkannya, riwayat status per-run (chip kecil, terbaru di kiri, maks. 15 run,
-klik untuk buka drilldown-nya), KPI ringkas (pass/fail/error), dan **tombol ↻ Re-run per baris**.
-Tombol re-run per tabel juga ada di header drilldown tabel. Setelah re-run per tabel, redirect
-kembali KE HALAMAN STATUS (bukan ke halaman run barunya yang cuma 1 tabel) — dan halaman ini
-auto-refresh tiap 5 detik selagi masih ada tabel yang berjalan. Tabel yang sudah dihapus dari config
-tapi masih punya riwayat tetap ditampilkan (ditandai), supaya riwayatnya tidak diam-diam hilang.
+A real usability problem from the partial re-run flow: every re-run creates a NEW Run containing
+only the re-run tables — so once a run becomes partial, no single place shows "where does every
+table currently stand"; the user had to mentally merge several runs. **Solution**: the
+`/configs/{id}/status` page ("Table Status," linked from the config page, run page, and table
+drilldown) showing a per-table matrix: the CURRENT status across all runs (not just the last one),
+which run produced it, per-run status history (small chips, newest on the left, up to 15 runs, click
+to open that run's drilldown), a KPI summary (pass/fail/error), and a **per-row ↻ Re-run button**.
+The per-table re-run button also appears on the table drilldown header. After a per-table re-run,
+the redirect goes BACK TO THE STATUS PAGE (not to the new 1-table run's own page) — and this page
+auto-refreshes every 5 seconds while any table is still running. Tables removed from the config but
+that still have history are still shown (flagged), so history doesn't silently disappear.
 Test: `tests/test_config_status.py`.
 
-### Perubahan perilaku: Resume = pilihan scope re-run (all / fail / error / non-PASS)
+### Behavior change: Resume = choice of re-run scope (all / fail / error / non-PASS)
 
-Berevolusi dua kali atas permintaan user. Awalnya tombol "Resume" hanya menjalankan ulang tabel yang
-BELUM SELESAI (status error/pending/running sisa run terputus) — tabel `fail` dianggap "selesai" dan
-dilewati. Lalu diubah jadi "re-run semua non-PASS". Bentuk finalnya sekarang: **dropdown pilihan
-scope di sebelah tombol Re-run** di halaman run — "Semua non-PASS (fail + error + cancelled)"
-(default), "Hanya FAIL", "Hanya ERROR", atau "Semua tabel". Kalau scope yang dipilih tidak cocok
-dengan tabel mana pun (mis. "Hanya ERROR" padahal tidak ada tabel error), TIDAK ada run baru yang
-dibuat — muncul flash message, bukan diam-diam menjalankan semua tabel (fallback berbahaya yang ada
-di kode lama: `table_filter=remaining or None` berarti list kosong → `None` → SEMUA tabel).
-Implementasi: `run_service.resume_run(db, run, scope)` + `RESUME_SCOPES`, test:
+Evolved twice at the user's request. Originally, the "Resume" button only re-ran tables that were
+NOT YET FINISHED (error/pending/running remnants of an interrupted run) — `fail` tables were
+considered "done" and skipped. Then it changed to "re-run all non-PASS." The final form now: a
+**scope dropdown next to the Re-run button** on the run page — "All non-PASS (fail + error +
+cancelled)" (default), "FAIL only," "ERROR only," or "All tables." If the chosen scope matches no
+table at all (e.g. "ERROR only" when there are no error tables), NO new run is created — a flash
+message appears instead of silently running all tables (a dangerous fallback in the old code:
+`table_filter=remaining or None` meant an empty list → `None` → ALL tables). Implementation:
+`run_service.resume_run(db, run, scope)` + `RESUME_SCOPES`, tests:
 `tests/test_run_service.py::test_resume_scopes_select_the_right_tables` &
 `test_resume_with_empty_scope_selection_creates_nothing`.
 
-### Insiden: tabel ERROR tanpa alasan apa pun — dan lahirnya tab "Log"
+### Incident: an ERRORed table with no reason at all — and the birth of the "Log" tab
 
-User meminta log kenapa sebuah tabel bisa ERROR. Investigasi menemukan bug yang lebih dalam dari
-sekadar "belum ada fiturnya": **pesan errornya memang tidak pernah disimpan sama sekali**.
-`tiered.run_table()` menangkap semua exception level-tabel sendiri dan mengembalikan objek hasil
-NORMAL dengan `status="ERROR"` dan alasannya di `.error` — tapi `_persist_table_result()` tidak
-pernah menyalin `.error` itu ke kolom `run_tables.error` (jalur `err is not None` di `_execute_run`
-yang MENYIMPAN error hampir tidak pernah aktif, karena exception sudah keburu ditangkap di lapisan
-bawah). Hasilnya: tabel ERROR tersimpan dengan status `error` tapi pesan NULL — tidak ada petunjuk
-apa pun di UI.
+A user asked why a table could ERROR with no visible reason. Investigation found a deeper bug than
+just "the feature doesn't exist yet": **the error message was never being saved at all**.
+`tiered.run_table()` catches all table-level exceptions itself and returns a NORMAL result object
+with `status="ERROR"` and the reason in `.error` — but `_persist_table_result()` never copied that
+`.error` into the `run_tables.error` column (the `err is not None` path in `_execute_run` that DID
+save the error was almost never active, because the exception had already been caught at a lower
+layer). Result: ERRORed tables were stored with status `error` but a NULL message — no clue anywhere
+in the UI.
 
-**Perbaikan** (dua lapis):
-1. `rt.error = result.error` di `_persist_table_result()` — alasan singkat sekarang tersimpan dan
-   tampil di header drilldown.
-2. **Tab "Log" baru** di drilldown tabel: jejak proses per-tabel (fase Tier 1/Tier 2, checkpoint
-   chunk, retry) yang sebelumnya cuma hidup di event bus in-memory (hilang begitu run selesai/server
-   restart) sekarang direkam per tabel — dibatasi 200 event terakhir (`collections.deque(maxlen=200)`)
-   supaya tabel besar dengan ratusan checkpoint chunk tidak membengkakkan DB — dan dipersist ke kolom
-   JSON baru `run_tables.event_log` saat tabel selesai. Kalau tabel ERROR, **traceback Python
-   lengkap** ditambahkan sebagai entri terakhir (field baru `TableRunResult.error_trace`), jadi
-   akar masalah bisa dilihat langsung di UI tanpa buka log server. Regression test:
-   `tests/test_error_logging.py` (run sungguhan dengan 1 tabel valid + 1 tabel tidak ada → tabel
-   error harus punya `error` terisi + trail berakhir dengan traceback; tabel pass punya trail tanpa
-   traceback; tab Log me-render semuanya).
+**Fix (two layers)**:
+1. `rt.error = result.error` in `_persist_table_result()` — the short reason is now saved and shown
+   in the drilldown header.
+2. **New "Log" tab** on the table drilldown: a per-table process trail (Tier 1/Tier 2 phases, chunk
+   checkpoints, retries) that previously only lived in the in-memory event bus (lost once a run
+   finishes/server restarts) is now recorded per table — capped at the last 200 events
+   (`collections.deque(maxlen=200)`) so a large table with hundreds of chunk checkpoints doesn't
+   bloat the DB — and persisted to a new `run_tables.event_log` JSON column when the table finishes.
+   If a table ERRORs, the **full Python traceback** is appended as the final entry (new
+   `TableRunResult.error_trace` field), so the root cause can be seen directly in the UI without
+   opening server logs. Regression test: `tests/test_error_logging.py` (a real run with 1 valid
+   table + 1 nonexistent table → the errored table must have `error` populated + a trail ending in a
+   traceback; the passing table has a trail with no traceback; the Log tab renders all of it).
 
-### Insiden: `boolean value of NA is ambiguous` — tabel ERROR karena kolom satu-sisi
+### Incident: `boolean value of NA is ambiguous` — a table ERRORed because of a one-sided column
 
-Tabel `datamart_orders_smdv` ERROR dengan pesan `boolean value of NA is ambiguous`. Berkat tab "Log"
-yang baru ditambahkan, traceback lengkapnya langsung kelihatan di UI: crash di
-`_date_ceiling_bounds()` pada `if not col_type` — kolom `master_updated_at` cuma ada di SATU sisi
-(target), jadi tipe sisi satunya di merged-schema DataFrame adalah missing value. Masalahnya: missing
-value pandas bisa datang sebagai `np.nan` (float) ATAU `pd.NA` tergantung dtype DataFrame-nya, dan
-`not pd.NA` melempar TypeError (pandas sengaja menolak konversi NA ke boolean) — guard
-`isinstance(col_type, float)` yang ada tidak pernah sempat jalan karena `not col_type` di KIRI-nya
-dievaluasi duluan. **Perbaikan**: cek `pd.isna()` DULU sebelum test truthiness apa pun
-(`if col_type is None or pd.isna(col_type): continue`). Diverifikasi langsung terhadap schema
-production tabel itu (34 kolom termasuk yang satu-sisi) — lolos semua. Regression test:
-`tests/test_aggregate_validator.py::test_pandas_na_missing_type_does_not_crash` (ketiga varian
-missing: `pd.NA`, `np.nan`, `float("nan")`).
+Table `datamart_orders_smdv` ERRORed with the message `boolean value of NA is ambiguous`. Thanks to
+the newly-added "Log" tab, the full traceback was immediately visible in the UI: a crash in
+`_date_ceiling_bounds()` at `if not col_type` — column `master_updated_at` only exists on ONE side
+(target), so its type on the other side in the merged-schema DataFrame is a missing value. The
+problem: pandas missing values can come as `np.nan` (float) OR `pd.NA` depending on the DataFrame's
+dtype, and `not pd.NA` raises a TypeError (pandas deliberately refuses to convert NA to a boolean) —
+the existing `isinstance(col_type, float)` guard never got a chance to run because `not col_type` to
+its LEFT was evaluated first. **Fix**: check `pd.isna()` FIRST before testing truthiness at all
+(`if col_type is None or pd.isna(col_type): continue`). Directly verified against that table's
+production schema (34 columns, including the one-sided one) — all passed. Regression test:
+`tests/test_aggregate_validator.py::test_pandas_na_missing_type_does_not_crash` (all three missing
+variants: `pd.NA`, `np.nan`, `float("nan")`).
 
-**Lapisan kedua dari insiden yang sama** (ketemu setelah fix di atas jalan): kolom satu-sisi itu
-(`master_updated_at`) ternyata juga adalah **`date_column` yang dikonfigurasi** untuk tabel ini —
-dan breakdown bulanan/tahunan memakai `date_column` di query KEDUA sisi, jadi sisi target (yang
-tidak punya kolom itu) langsung gagal `UNKNOWN_IDENTIFIER` dan meng-ERROR-kan seluruh tabel.
-**Perbaikan**: sebelum laporan apa pun jalan, `AggregateValidator.run()` sekarang mengecek
-`date_column` ada di KEDUA schema — kalau tidak, semua fitur berbasis tanggal (breakdown
-bulanan/tahunan, investigate query, filter rentang tanggal) dilewati untuk tabel itu (Report 1-3
-tetap jalan penuh), dengan catatan jelas di tab SQL ("Period Breakdown SKIPPED" + alasan + saran
-perbaiki config). Memfilter hanya di sisi yang PUNYA kolomnya bukan opsi — dua sisi akan
-dibandingkan atas himpunan baris yang berbeda. Diverifikasi terhadap tabel production yang sama:
-sekarang selesai tanpa crash dengan verdict FAIL yang GENUINE (13.036 vs 16.012 baris — selisih
-nyata ~3.000 baris yang memang seharusnya ketahuan). Regression test:
-`tests/test_aggregate_validator.py::TestDateColumnMissingOnOneSide`.
+**A second layer of the same incident** (found after the fix above landed): that one-sided column
+(`master_updated_at`) also turned out to be the **configured `date_column`** for this table — and
+the monthly/yearly breakdown uses `date_column` in queries on BOTH sides, so the target side (which
+doesn't have that column) immediately failed with `UNKNOWN_IDENTIFIER`, ERRORing the whole table.
+**Fix**: before any report runs, `AggregateValidator.run()` now checks that `date_column` exists on
+BOTH schemas — if not, every date-based feature (monthly/yearly breakdown, investigate query, date
+range filter) is skipped for that table (Reports 1-3 still run in full), with a clear note in the SQL
+tab ("Period Breakdown SKIPPED" + reason + suggestion to fix the config). Filtering only on the side
+that HAS the column isn't an option — the two sides would then be compared over different row sets.
+Verified against the same production table: it now completes without crashing, with a GENUINE FAIL
+verdict (13,036 vs 16,012 rows — a real ~3,000-row difference that genuinely should be flagged).
+Regression test: `tests/test_aggregate_validator.py::TestDateColumnMissingOnOneSide`.
 
-### Insiden: `StreamFailureError` kosong — chunk fetch besar terputus di 600 detik
+### Incident: an empty `StreamFailureError` — a large chunk fetch cut off at 600 seconds
 
-Tabel `datamart_logger_monitoring` ERROR dengan `StreamFailureError:` yang pesannya KOSONG. Dari tab
-Log kelihatan timeline-nya: fetch chunk mulai 10:38:12, mati 10:48:48 — **636 detik, persis melewati
-`send_receive_timeout=600`** di connector ClickHouse. Akar masalah gandanya: (1) chunking row-level
-membagi berdasarkan RENTANG id (`asset_rtmd_id` 0–22827, jauh di bawah `id_chunk_size` 2 juta) —
-tapi tabel ini composite-key dengan BANYAK baris per id × 105 kolom, jadi seluruh tabel jatuh ke
-SATU chunk yang fetch-nya >10 menit; (2) begitu timeout memutus koneksi di tengah stream,
-`clickhouse_connect` melempar `StreamFailureError` berisi teks apa pun yang sempat diterima dari
-server — yaitu KOSONG, karena servernya tidak sempat bilang apa-apa.
+Table `datamart_logger_monitoring` ERRORed with a `StreamFailureError:` whose message was EMPTY. The
+new Log tab showed the timeline: chunk fetch started at 10:38:12, died at 10:48:48 — **636 seconds,
+right past `send_receive_timeout=600`** in the ClickHouse connector. A twofold root cause: (1)
+row-level chunking splits by id RANGE (`asset_rtmd_id` 0–22827, well below `id_chunk_size` 2
+million) — but this is a composite-key table with MANY rows per id × 105 columns, so the entire table
+fell into ONE chunk whose fetch took >10 minutes; (2) once the timeout severed the connection
+mid-stream, `clickhouse_connect` raised a `StreamFailureError` containing whatever text the server
+had managed to send — which was EMPTY, because the server hadn't managed to say anything.
 
-**Perbaikan**: (1) `send_receive_timeout` dinaikkan 600 → 3600 detik, konsisten dengan timeout
-read/write 3600 yang sudah dipakai connector MySQL, dan bisa di-override per koneksi lewat
-`params.send_receive_timeout`; (2) `StreamFailureError` kosong sekarang diganti pesan yang bisa
-ditindaklanjuti (kemungkinan penyebab + saran perkecil `id_chunk_size` + potongan query-nya), dan
-sengaja mengandung kata "connection" supaya diklasifikasikan transient oleh retry runner — blip
-jaringan/VPN di tengah stream akan di-retry otomatis seperti error koneksi lain. Regression test:
-`tests/test_connectors.py::TestClickHouseStreamFailureMessage`.
+**Fix**: (1) `send_receive_timeout` raised from 600 to 3600 seconds, consistent with the 3600-second
+read/write timeout already used by the MySQL connector, and overridable per-connection via
+`params.send_receive_timeout`; (2) an empty `StreamFailureError` is now replaced with an actionable
+message (likely cause + suggestion to reduce `id_chunk_size` + the query snippet), and it
+deliberately includes the word "connection" so it's classified as transient by the retry runner — a
+network/VPN blip mid-stream now gets automatically retried like any other connection error.
+Regression test: `tests/test_connectors.py::TestClickHouseStreamFailureMessage`.
 
-**Babak kedua insiden yang sama — timeout bukan akar masalahnya.** Dengan timeout 3600 pun, tabel
-yang sama gagal lagi: fetch-nya jalan hampir 2 JAM lalu stream-nya rusak di tengah
-(`unrecognized data found in stream`). Akar masalah sesungguhnya: **chunking row-level membagi
-berdasarkan RENTANG id** (`id_chunk_size`, default 2 juta), yang asumsinya ~1 baris per id
-(auto-increment PK). Tabel composite-key mematahkan asumsi itu: `asset_rtmd_id` cuma 0–22827 tapi
-tiap id punya ~139 baris (3,17 juta baris total × 105 kolom) → SELURUH tabel jatuh ke SATU chunk.
-**Perbaikan fundamental: chunking sadar-kepadatan** — query MIN/MAX kini juga mengambil COUNT(*),
-dan kalau kepadatannya > 1,5 baris/id, rentang id per chunk dikecilkan supaya satu chunk membawa
-±`rowlevel_target_chunk_rows` BARIS (default 500 ribu; bisa dioverride per config lewat `settings`).
-Tabel normal (~1 baris/id) tidak berubah sama sekali — shrink hanya pernah MENGECILKAN chunk, tidak
-pernah membesarkan. Untuk tabel insiden: 3,17 juta baris → 7 chunk × ±453 ribu baris (fetch
-beberapa menit per chunk, jauh di bawah timeout, memory bounded) alih-alih satu fetch 2 jam.
-Regression test: `tests/test_rowlevel_chunking.py` (tabel dense composite-key → terpecah jadi
-beberapa chunk row-bounded dengan hasil validasi tetap benar; tabel sparse/normal → tetap 1 chunk
-legacy tanpa pesan "dense").
+**Second round of the same incident — the timeout wasn't the root cause.** Even at a 3600-second
+timeout, the same table failed again: the fetch ran for almost 2 HOURS before the stream broke
+mid-way (`unrecognized data found in stream`). The real root cause: **row-level chunking splits by
+id RANGE** (`id_chunk_size`, default 2 million), which assumes ~1 row per id (an auto-increment PK).
+A composite-key table breaks that assumption: `asset_rtmd_id` only spans 0–22827 but each id has
+~139 rows (3.17 million rows total × 105 columns) → the ENTIRE table fell into ONE chunk.
+**Fundamental fix: density-aware chunking** — the MIN/MAX query now also fetches COUNT(*), and if
+density exceeds 1.5 rows/id, the id range per chunk shrinks so a chunk carries roughly
+±`rowlevel_target_chunk_rows` ROWS (default 500 thousand; overridable per-config via `settings`).
+Normal tables (~1 row/id) are unchanged — shrinking only ever MAKES chunks smaller, never bigger.
+For the incident table: 3.17 million rows → 7 chunks × ±453 thousand rows (a few minutes per chunk
+fetch, well under the timeout, memory bounded) instead of one 2-hour fetch. Regression test:
+`tests/test_rowlevel_chunking.py` (a dense composite-key table → split into several row-bounded
+chunks with correct validation results; a sparse/normal table → still 1 legacy chunk, no "dense"
+message).
 
-**Babak ketiga — desync stream `unrecognized data found in stream`.** Setelah chunking benar (7
-chunk, 3 chunk pertama lancar), chunk 4 masih gagal: fetch macet ~14 menit lalu parser
-`clickhouse_connect` kehilangan posisi di stream — hex yang dilaporkan jelas-jelas data float64
-mentah yang terbaca di offset yang salah. Ini pola desync klasik **stream HTTP terkompresi** yang
-lewat proxy/LB (host deployment ini di belakang domain/proxy): satu frame boundary yang di-rechunk/
-terganggu, dan semua byte setelahnya salah baca. **Perbaikan** (dua lapis): (1) **kompresi respons
-dimatikan default-nya** (`compress=False` di `get_client`; bisa dinyalakan lagi per koneksi lewat
-`params {"compress": true}`) — bandwidth naik tapi failure mode-nya hilang; (2) **self-heal di
-connector**: `StreamFailureError` meninggalkan sesi HTTP client dalam keadaan tak tentu, jadi retry
-di client yang sama percuma — connector sekarang MEMBANGUN ULANG client (koneksi baru) dan
-menjalankan ulang query-nya sampai 2×, baru menyerah dengan pesan jelas; plus marker "stream"
-ditambahkan ke klasifikasi transient supaya sisa kegagalan masih dapat retry level-tabel.
-**Diverifikasi langsung**: chunk 4 yang gagal dua kali itu di-refetch dengan connector baru —
-1,16 juta baris × 110 kolom selesai bersih dalam 4,5 menit tanpa desync. Regression test:
-`tests/test_connectors.py::TestClickHouseStreamSelfHeal`.
+**Third round — stream desync `unrecognized data found in stream`.** After chunking was fixed (7
+chunks, the first 3 went fine), chunk 4 still failed: the fetch hung for ~14 minutes then the
+`clickhouse_connect` parser lost its position in the stream — the reported hex was clearly raw
+float64 data read at the wrong offset. This is the classic desync pattern for **compressed HTTP
+streams** passing through a proxy/LB (this deployment sits behind a domain/proxy): one frame
+boundary gets re-chunked/disrupted, and every byte after it is misread. **Fix** (two layers): (1)
+**response compression disabled by default** (`compress=False` in `get_client`; can be re-enabled
+per connection via `params {"compress": true}`) — bandwidth goes up but the failure mode disappears;
+(2) **self-heal in the connector**: a `StreamFailureError` leaves the HTTP client session in an
+undefined state, so retrying on the same client is pointless — the connector now REBUILDS the client
+(a fresh connection) and re-runs the query, up to 2 retries, before finally giving up with a clear
+message; plus a "stream" marker was added to transient-error classification so any remaining failures
+can still be retried at the table level. **Directly verified**: the chunk 4 that had failed twice was
+refetched with a fresh connector — 1.16 million rows × 110 columns finished cleanly in 4.5 minutes
+with no desync. Regression test: `tests/test_connectors.py::TestClickHouseStreamSelfHeal`.
 
-**Insiden: `NO_COMMON_TYPE` — kolom chunk String berisi digit dikira numerik.** Tabel
-`datamart_wms_report_waste_bags` ERROR: `waste_bag_id` bertipe `Nullable(String)` di kedua sisi,
-tapi isinya digit semua (mis. `101012026`). Deteksi "kolom numerik atau bukan" lama memakai
-`int(min_value)` — string digit lolos konversi, jadi runner salah mengira kolom itu numerik:
-(1) query range `WHERE waste_bag_id >= 101012026` memakai literal integer, yang MySQL toleransi
-tapi ClickHouse tolak (`NO_COMMON_TYPE` String vs UInt32); (2) MIN/MAX string itu urutan
-LEKSIKOGRAFIS, jadi rentang id-nya ngawur — insiden ini menghitung 499.912 chunk untuk tabel 254
-ribu baris. **Perbaikan**: cek dtype nilai MIN/MAX yang dikembalikan driver — kalau `str`/`bytes`
-(kolomnya string, apa pun isinya), jatuh ke jalur single full-table scan yang memang sudah ada untuk
-kolom non-numerik, dengan pesan log yang menjelaskan alasannya. Tabel insiden cuma 254 ribu baris ×
-35 kolom — full scan aman. Regression test:
+**Incident: `NO_COMMON_TYPE` — a digit-only String chunk column mistaken for numeric.** Table
+`datamart_wms_report_waste_bags` ERRORed: `waste_bag_id` is `Nullable(String)` on both sides, but its
+contents are all digits (e.g. `101012026`). The old "numeric or not" detection used
+`int(min_value)` — digit strings pass that conversion, so the runner incorrectly treated the column
+as numeric: (1) the range query `WHERE waste_bag_id >= 101012026` used an integer literal, which
+MySQL tolerates but ClickHouse rejects (`NO_COMMON_TYPE` String vs UInt32); (2) MIN/MAX on that
+string sort LEXICOGRAPHICALLY, so the id range was nonsensical — this incident produced 499,912
+chunks for a 254-thousand-row table. **Fix**: check the dtype of the MIN/MAX values the driver
+returns — if `str`/`bytes` (the column is a string, whatever its content), fall back to the existing
+single full-table-scan path already used for non-numeric columns, with a log message explaining why.
+The incident table is only 254 thousand rows × 35 columns — a full scan is safe. Regression test:
 `tests/test_rowlevel_chunking.py::test_digit_string_chunk_column_falls_back_to_full_scan`.
 
-**Bug ikutan yang ketahuan dari insiden ini** (pertanyaan user: "kenapa validasi aggregate-nya ikut
-hilang padahal errornya di Tier 2?"): tabel yang ERROR di Tier 2 menampilkan `rows: — / —` dan tab
-Temuan Agregat kosong — padahal Tier 1 SUDAH selesai penuh sebelum Tier 2 gagal. Penyebabnya: blok
-`except` di `tiered.run_table()` membangun `TableRunResult` ERROR polos tanpa membawa hasil apa pun —
-`aggregate_result` cuma variabel lokal di dalam `_do()` yang ikut mati bersama exception-nya.
-**Perbaikan**: hasil yang SUDAH selesai di-stash ke dict `partial` begitu tiap fase tuntas (hasil
-Tier 1, tier yang tercapai, semua query yang sempat dieksekusi) — jalur error sekarang melampirkan
-semua itu, jadi tabel ERROR tetap menampilkan row count, temuan agregat, tipe kolom, periode, dan
-tab SQL dari Tier 1-nya, plus error + traceback Tier 2-nya di tab Log. Regression test:
-`tests/test_tiered_runner.py::TestTier2ErrorKeepsTier1Results`.
+**A related bug surfaced by this incident** (the user's question: "why did the aggregate validation
+disappear too, when the error was in Tier 2?"): a table that ERRORed in Tier 2 showed `rows: — / —`
+and an empty Aggregate Findings tab — even though Tier 1 had ALREADY finished completely before Tier
+2 failed. Cause: the `except` block in `tiered.run_table()` built a plain ERROR `TableRunResult`
+carrying no results at all — `aggregate_result` was just a local variable inside `_do()` that died
+along with the exception. **Fix**: results already completed are stashed into a `partial` dict as
+each phase finishes (Tier 1's result, which tier was reached, every query executed so far) — the
+error path now attaches all of that, so an ERRORed table still shows its Tier 1's row count,
+aggregate findings, column types, period breakdown, and SQL tab, plus the Tier 2 error + traceback on
+the Log tab. Regression test: `tests/test_tiered_runner.py::TestTier2ErrorKeepsTier1Results`.
 
-### Fitur: tab Periode menunjukkan kolom/metrik yang mismatch, bukan cuma "periode ini beda"
+### Feature: the Period tab now shows which column/metric mismatched, not just "this period differs"
 
-User bingung (wajar): tab Periode cuma menampilkan Source rows/Target rows/Δ, jadi periode dengan
-**Δ = 0** (jumlah baris IDENTIK di kedua sisi) tetap muncul di daftar mismatch tanpa alasan yang
-kelihatan — seperti alarm palsu. Penyebabnya bukan bug: `match` di `gen_report_period_breakdown`
-memang bukan cuma soal row count —
+A user was (reasonably) confused: the Period tab only showed Source rows/Target rows/Δ, so a period
+with **Δ = 0** (row count IDENTICAL on both sides) still showed up in the mismatch list with no
+visible reason — looking like a false alarm. This wasn't a bug: `match` in
+`gen_report_period_breakdown` was never just about row count —
 ```python
 merged["match"] = merged["row_match"] & (merged["stat_mismatch"] == 0)
 ```
-`stat_mismatch` dihitung dari SUM/MIN/MAX/datediff kolom-kolom shared LAIN untuk periode itu — kalau
-row count sama tapi salah satu statistik itu beda, periode tetap dianggap mismatch. Masalahnya:
-detail KOLOM/METRIK mana yang beda tidak pernah disimpan, cuma dihitung sekilas lalu dibuang.
+`stat_mismatch` is computed from SUM/MIN/MAX/datediff of the other shared columns for that period —
+if row count matches but one of those stats differs, the period is still flagged as a mismatch. The
+problem: WHICH column/metric caused it was never stored, just computed briefly and then discarded.
 
-**Perbaikan**: `gen_report_period_breakdown` sekarang menyimpan `mismatch_detail` — daftar
-`{column, metric, source, target}` per periode, bukan cuma angka `stat_mismatch`.
-`_persist_aggregate_findings` memecahnya jadi finding TERPISAH per alasan: satu finding "row count"
-(HANYA kalau row count-nya memang beda), PLUS satu finding per (kolom, metrik) yang mismatch — jadi
-periode Δ=0 yang tetap ke-flag sekarang punya baris eksplisit yang bilang "sum kolom X beda", bukan
-kosong. Tab Periode menampilkan kolom baru **Jenis** (row count / nama metrik: sum, min, max,
-datediff, sum_len, dst.) dan **Kolom**. Badge navigasi tetap menghitung jumlah PERIODE yang
-mismatch (bukan jumlah baris finding, yang sekarang bisa lebih banyak dari jumlah periode).
-Regression test: `tests/test_period_findings.py` (komputasi `mismatch_detail` pakai fixture nyata
-`orders_pair`, parsing alias metrik, persistensi jadi finding terpisah) +
-`tests/test_table_drilldown.py::test_periode_tab_shows_metric_detail_for_zero_delta_periods`.
+**Fix**: `gen_report_period_breakdown` now stores `mismatch_detail` — a list of
+`{column, metric, source, target}` per period, not just the `stat_mismatch` number.
+`_persist_aggregate_findings` splits it into a SEPARATE finding per reason: one "row count" finding
+(ONLY if row count actually differs), PLUS one finding per (column, metric) that mismatched — so a
+Δ=0 period that's still flagged now has an explicit row saying "column X's sum differs," not nothing.
+The Period tab shows new **Type** (row count / metric name: sum, min, max, datediff, sum_len, etc.)
+and **Column** columns. The nav badge still counts mismatched PERIODS (not finding rows, which can
+now outnumber periods). Regression test: `tests/test_period_findings.py` (`mismatch_detail`
+computation using the real `orders_pair` fixture, metric alias parsing, persistence into separate
+findings) + `tests/test_table_drilldown.py::test_periode_tab_shows_metric_detail_for_zero_delta_periods`.
 
-### Fitur: copy key bermasalah (Missing Keys / Value Diffs) siap-tempel untuk `WHERE id IN (...)`
+### Feature: copy problematic keys (Missing Keys / Value Diffs) ready to paste into `WHERE id IN (...)`
 
-Permintaan user: mereka punya script manual untuk insert ulang ke pipeline, dan perlu daftar ID yang
-missing/differing untuk dipakai di `WHERE id IN (...)`. Tombol **📋 Copy** di tab Missing Keys (2
-tombol: hilang di TARGET / hilang di SOURCE) dan Value Diffs (mengikuti filter kolom yang aktif, atau
-semua kolom sekaligus jika tidak difilter) — mengambil SEMUA key yang cocok (bukan cuma halaman yang
-sedang ditampilkan, karena kedua tab ini dipaginasi) lewat endpoint baru
-`GET /runs/{run_id}/tables/{run_table_id}/keys?kind=...&column=...`, menampilkannya di textarea yang
-otomatis ter-select (supaya Ctrl+C manual selalu berhasil) sambil mencoba auto-copy ke clipboard
-(`navigator.clipboard` butuh HTTPS/localhost — kalau server diakses lewat HTTP biasa di jaringan
-internal, auto-copy bisa gagal diam-diam; makanya fallback textarea-nya WAJIB ada, bukan sekadar
+User request: they have a manual script to re-insert into the pipeline, and need the list of
+missing/differing IDs to use in `WHERE id IN (...)`. A **📋 Copy** button on the Missing Keys tab (2
+buttons: missing in TARGET / missing in SOURCE) and Value Diffs (respects the active column filter,
+or all columns if unfiltered) — fetches EVERY matching key (not just the currently-displayed page,
+since both tabs are paginated) via a new endpoint
+`GET /runs/{run_id}/tables/{run_table_id}/keys?kind=...&column=...`, displaying it in a textarea
+that's auto-selected (so a manual Ctrl+C always works) while attempting an auto-copy to the clipboard
+(`navigator.clipboard` requires HTTPS/localhost — if the server is accessed over plain HTTP on an
+internal network, auto-copy can silently fail; hence the textarea fallback is MANDATORY, not just a
 nice-to-have).
 
-Format hasil: angka polos dipisah koma kalau SEMUA key numerik (siap tempel langsung ke `IN (...)`),
-di-quote (`'...'`) kalau ada yang bukan angka. Untuk key yang differing di Value Diffs, key yang
-sama TIDAK diulang walau muncul di beberapa kolom berbeda (distinct) — user butuh daftar row id unik
-untuk re-insert, bukan satu baris per kolom yang beda. Untuk composite key (lebih dari 1 kolom key),
-key ditampilkan APA ADANYA (gabungan dengan `_`, sesuai `composite_key()` di comparator) dengan
-header yang menjelaskan urutan kolomnya — SENGAJA tidak dipecah balik jadi tuple per kolom, karena
-penggabungan dengan `_` itu lossy (kalau salah satu value aslinya mengandung `_`, tebak-tebakan
-pemisahannya bisa salah) — lebih jujur menampilkan nilai asli daripada diam-diam salah parse.
-Regression test: `tests/test_copy_keys.py`.
+Result format: plain numbers comma-separated if EVERY key is numeric (ready to paste straight into
+`IN (...)`), quoted (`'...'`) if any aren't. For differing keys in Value Diffs, the same key is NOT
+repeated even if it appears across multiple different columns (distinct) — the user needs a unique
+list of row ids to re-insert, not one row per differing column. For composite keys (more than 1 key
+column), the key is shown AS-IS (joined with `_`, per `composite_key()` in the comparator) with a
+header explaining the column order — DELIBERATELY not split back into a per-column tuple, since
+joining with `_` is lossy (if any original value itself contains `_`, guessing the split could
+silently get it wrong) — showing the true raw value is more honest than a guess that could quietly
+be incorrect. Regression test: `tests/test_copy_keys.py`.
 
-### Fitur: polish tampilan (dropdown, editor tabel config, popup copy-key) + insiden cache CSS basi
+### Feature: visual polish (dropdowns, config table editor, copy-key popup) + stale CSS cache incident
 
-Permintaan user langsung dari screenshot: dropdown terlihat polos/tidak sesuai tema, editor pemetaan
-tabel di halaman config berantakan, dan panel "Copy key" seharusnya jadi popup di tengah layar.
-**Perbaikan** (murni CSS/template, tidak menyentuh logika backend):
-- **Semua `<select>`** di seluruh app sebelumnya TIDAK PUNYA styling custom sama sekali (mengandalkan
-  tampilan default browser/OS) — sekarang dapat border/radius konsisten, chevron custom (beda warna
-  untuk light/dark), efek hover/focus — otomatis di SEMUA halaman tanpa perlu ubah template satu pun
-  (perbaikan CSS global murni). `<select multiple>` dikecualikan dari chevron (browser me-render-nya
-  sebagai listbox selalu-terbuka, bukan dropdown tertutup) tapi tetap dapat border/warna yang serasi.
-- **Editor pemetaan tabel** (`config_detail.html`): semua sel `vertical-align: top`, padding seragam,
-  ukuran select/multi-select/input konsisten, tombol hapus (✕) jadi lingkaran kecil yang lebih rapi.
-- **Panel Copy Key**: diubah dari textarea inline di bawah tombol jadi **modal popup di tengah**
-  (overlay gelap, kartu dengan judul+tombol tutup, tombol "Salin ke Clipboard" yang bisa diklik
-  ulang) — CSS generik (`.modal-backdrop`/`.modal-card`) supaya dipakai ulang kalau ada modal lain
-  nanti.
+Direct user request from screenshots: dropdowns looked plain/off-theme, the table mapping editor on
+the config page looked messy, and the "Copy key" panel should be a centered popup. **Fixes** (purely
+CSS/template, no backend logic touched):
+- **Every `<select>`** app-wide previously had NO custom styling at all (relying on the browser/OS
+  default look) — now gets a consistent border/radius, a custom chevron (different color for
+  light/dark), hover/focus effects — automatically on EVERY page without touching a single template
+  (a purely global CSS fix). `<select multiple>` is excluded from the chevron (browsers render it as
+  an always-open listbox, not a closed dropdown) but still gets a matching border/color.
+- **Table mapping editor** (`config_detail.html`): every cell `vertical-align: top`, consistent
+  padding, uniform select/multi-select/input sizing, the delete button (✕) is now a neater small
+  circle.
+- **Copy Key panel**: changed from an inline textarea below the button into a **centered modal popup**
+  (dark overlay, a card with a title + close button, a re-clickable "Copy to Clipboard" button) —
+  generic CSS (`.modal-backdrop`/`.modal-card`) so it can be reused if another modal is needed later.
 
-**Insiden ikutan**: setelah deploy, modal-nya TETAP tampil polos/tidak ter-styling di browser user
-meski server sudah dikonfirmasi (lewat curl) menyajikan CSS yang baru — **browser meng-cache
-`app.css` versi lama**. `StaticFiles` (dipakai untuk `/static`) tidak mengirim `Cache-Control`
-apa pun, jadi browser bebas cache seagresif apa pun berdasarkan heuristiknya sendiri; setiap kali CSS
-berubah, user yang browser-nya sudah pernah buka app ini akan tetap melihat versi lama sampai
-hard-refresh manual. **Perbaikan**: `<link>` stylesheet di `base.html` sekarang punya query string
-`?v={{ asset_version }}` — `asset_version` adalah Jinja *global* (di-set SEKALI saat startup di
-`ui.py`, dari mtime file `app.css` itu sendiri) yang otomatis tersedia di SEMUA template lewat
-`base.html`. Begitu file CSS berubah DAN server di-restart (satu-satunya momen assetnya benar-benar
-berubah, given tidak ada hot-reload di app ini), mtime-nya berubah, URL stylesheet-nya berubah —
-copy lama di cache browser jadi tidak relevan sama sekali karena tidak pernah diminta lagi lewat URL
-lama itu. Tidak perlu bump versi manual, tidak bergantung pada user mau hard-refresh atau tidak.
+**A follow-on incident**: after deploying, the modal STILL rendered plain/unstyled in a user's
+browser even though the server had been confirmed (via curl) to be serving the new CSS — **the
+browser was caching the old `app.css`**. `StaticFiles` (used for `/static`) doesn't send any
+`Cache-Control` header, so browsers are free to cache as aggressively as their own heuristics allow;
+every time the CSS changes, a user whose browser had already opened this app would keep seeing the
+old version until a manual hard-refresh. **Fix**: the stylesheet `<link>` in `base.html` now has a
+query string `?v={{ asset_version }}` — `asset_version` is a Jinja *global* (set ONCE at startup in
+`ui.py`, from the `app.css` file's own mtime) automatically available in EVERY template via
+`base.html`. Once the CSS file changes AND the server is restarted (the only time the asset actually
+changes, given there's no hot-reload in this app), its mtime changes, the stylesheet URL changes —
+any old cached copy in any browser becomes irrelevant since it's never requested again under that old
+URL. No manual version bump needed, doesn't depend on the user remembering to hard-refresh.
 Regression test: `tests/test_asset_versioning.py`.
 
-## Deviasi dari arsitektur target (dan kenapa)
+## RBAC & Data Scoping
 
-Dokumen [03-arsitektur.md](../../data-pipeline-batch/docs/validation-platform/03-arsitektur.md)
-menspesifikasikan FastAPI + Celery/Redis + PostgreSQL + React. Environment saat implementasi ini
-dibuat **tidak punya Node/npm terpasang** dan **Docker daemon tidak jalan**, jadi beberapa keputusan
-disesuaikan supaya project ini bisa langsung dicoba tanpa setup tambahan:
+Added 2026-07-21 during the migration to the production VPS. Summary (the full per-route matrix is
+in TECHNICAL.md §9, local-only):
 
-| Arsitektur target | Implementasi ini | Kenapa | Cara upgrade nanti |
+- **viewer** — can log in, view dashboard/configs/connections/runs. Cannot create or change anything.
+- **editor** — all viewer rights, PLUS create/manage THEIR OWN Connections & Configs, run
+  validations, cancel/resume runs. Cannot view/change data owned by OTHER users.
+- **admin** — can view & manage EVERY user's data (bypasses ownership). No route is purely
+  "admin-only" — the distinction is DATA visibility scope, not which actions are available.
+
+There's no "Manage Users" page in the UI yet — create/update accounts (including changing role or
+resetting a password) via the CLI:
+```powershell
+.venv\Scripts\python.exe scripts\create_user.py --email a@b.com --password secret --role editor --name "Jane Doe"
+```
+
+## Deployment
+
+Docker Compose (`app` + `caddy`) — see TECHNICAL.md §10 (local-only) for full architectural detail
+and two networking gotchas that were found (`host.docker.internal` pointing at the wrong gateway,
+UFW blocking container→host traffic). Summary:
+
+```powershell
+# on the server/VPS, after cloning/copying the repo there:
+cp .env.example .env
+# fill in .env: LIDVALID_ENV=production, LIDVALID_SECRET_KEY (generate a fresh one for a NEW
+# install; for MIGRATING an existing database, use the SAME key as the source's data/secret.key —
+# see TECHNICAL.md §10.4/§5.3 — a different key means every stored connection password becomes
+# undecryptable)
+docker compose up -d --build
+```
+
+Change the hostname in `Caddyfile` from `<vps-ip>.sslip.io` to your server's public IP (or a real
+domain if you have one) before deploying — Caddy handles the HTTPS certificate automatically.
+
+If the target database (MySQL/ClickHouse) is only reachable over a private VPN and the server
+doesn't have its own VPN profile yet: it can be bridged temporarily via an SSH reverse tunnel from a
+device whose VPN is active (TECHNICAL.md §10.6) — the server will keep depending on that device's
+live connection until it gets its own permanent VPN profile.
+
+## Deviations from the target architecture (and why)
+
+The [03-arsitektur.md](../../data-pipeline-batch/docs/validation-platform/03-arsitektur.md) document
+specifies FastAPI + Celery/Redis + PostgreSQL + React. The environment this implementation was
+originally built in **had no Node/npm installed** and **the Docker daemon wasn't running**, so
+several decisions were adjusted so this project could be tried immediately with no extra setup:
+
+| Target architecture | This implementation | Why | How to upgrade later |
 |---|---|---|---|
-| PostgreSQL | **SQLite** (default) | Zero-setup, `pip install` saja | `DATABASE_URL` env var → connection string Postgres; skema SQLAlchemy sudah portable (JSON type dsb) |
-| Celery + Redis worker | **`threading.Thread` + `ThreadPoolExecutor`** in-process | Redis/Celery butuh service terpisah, tak bisa diinstal offline dengan mudah di sesi ini | Ganti `run_service.start_run_async` jadi `.delay()` Celery task; struktur event/progress sudah dipisah di `events_bus.py` supaya gampang diganti jadi Redis pub/sub |
-| React SPA | **Server-rendered Jinja2 + vanilla JS** (fetch polling, tanpa framework) | Tidak ada Node/npm untuk build step | UI sudah terpisah rapi dari engine (routers hanya panggil services); bisa dibangun ulang sebagai SPA yang manggil endpoint JSON yang sama pola-nya dengan `/api/runs/{id}/status` |
-| SSE untuk live progress | **Polling `fetch()` tiap 2 detik** | Lebih sederhana & robust tanpa perlu Redis pub/sub lintas proses | `events_bus.py` sudah in-memory pub/sub — tinggal bungkus jadi `StreamingResponse` SSE bila mau |
-| Drilldown "semua kolom" (match + mismatch) | **Hanya temuan/mismatch** yang disimpan & ditampilkan | Lebih ringan di DB, dan lebih fokus ke "apa yang salah" — tapi memang bukan tabel perbandingan lengkap seperti Excel lama | Tambah kolom JSON di `RunTable` untuk simpan `column_details`/`src_type_details` penuh bila suatu saat dibutuhkan |
-| Import YAML config lama | **Belum ada** | Di luar scope sesi ini | `validation_core.models.TableSpec` sudah persis semantiknya — tinggal tulis parser YAML → `ConfigTable` rows |
-| RBAC penuh (admin/editor/viewer ditegakkan di semua endpoint) | **Auth ada, role dicatat, tapi enforcement per-endpoint belum lengkap** | Fokus waktu ke engine + alur inti | `app/auth.py::require_role` sudah ada, tinggal dipasang di endpoint yang butuh |
-| Notifikasi Slack/email, scheduler cron | **Belum ada** | Fase 2 di roadmap, di luar scope MVP ini | — |
-| Backfill trigger dari UI | **Belum ada** | Fase 3 di roadmap | — |
+| PostgreSQL | **SQLite** (default) | Zero setup, just `pip install` | `DATABASE_URL` env var → a Postgres connection string; the SQLAlchemy schema is already portable (JSON type, etc.) |
+| Celery + Redis worker | in-process **`threading.Thread` + `ThreadPoolExecutor`** | Redis/Celery need a separate service, hard to install offline easily in the original session | Swap `run_service.start_run_async` for a Celery `.delay()` task; event/progress structure is already isolated in `events_bus.py` to make swapping to Redis pub/sub easy |
+| React SPA | **Server-rendered Jinja2 + vanilla JS** (fetch polling, no framework) | No Node/npm for a build step | The UI is already cleanly separated from the engine (routers only call services); can be rebuilt as an SPA calling the same JSON endpoints in the same pattern as `/api/runs/{id}/status` |
+| SSE for live progress | **Polling `fetch()` every 2 seconds** | Simpler & more robust without needing cross-process Redis pub/sub | `events_bus.py` is already an in-memory pub/sub — just wrap it in a `StreamingResponse` SSE if wanted |
+| "All columns" drilldown (match + mismatch) | **Only findings/mismatches** are stored & shown | Lighter on the DB, and more focused on "what's wrong" — but genuinely not a full comparison table like the old Excel | Add a JSON column on `RunTable` to store the full `column_details`/`src_type_details` if ever needed |
+| Import legacy YAML config | **Not implemented** | Out of scope for the original session | `validation_core.models.TableSpec` already has the exact semantics — just needs a YAML → `ConfigTable` rows parser |
+| Full RBAC (admin/editor/viewer enforced on every endpoint) | **Implemented (2026-07-21)** — see "RBAC & Data Scoping" above | Originally deferred to focus time on the engine + core flow; added when migrating to a shared production VPS | Done — no further upgrade needed for the current scope |
+| Slack/email notifications, cron scheduler | **Not implemented** | Phase 2 in the roadmap, out of scope for this MVP | — |
+| Backfill trigger from the UI | **Not implemented** | Phase 3 in the roadmap | — |
 
-CLI standalone (`validation_core.runner.run_table` dipanggil langsung dari Python) tetap bisa dipakai
-tanpa web sama sekali — lihat `tests/conftest.py` untuk contoh pemakaian langsung ke connector.
+A standalone CLI (`validation_core.runner.run_table` called directly from Python) still works with
+no web layer at all — see `tests/conftest.py` for an example of calling a connector directly.
 
-## Kredensial demo
+## Demo credentials
 
-- Login: `admin@lidvalid.local` / `admin123` — **ganti setelah demo**, atau hapus `data/lidvalid.sqlite`
-  untuk mulai bersih.
-- Kunci enkripsi koneksi (`data/secret.key`) auto-dibuat saat pertama jalan. **Jangan commit file ini**
-  (sudah di `.gitignore`). Untuk produksi, set `LIDVALID_SECRET_KEY` sebagai env var alih-alih file lokal.
+- Login: `admin@lidvalid.local` / `admin123` — **change this after the demo**, or delete
+  `data/lidvalid.sqlite` to start clean.
+- The connection encryption key (`data/secret.key`) is auto-created on first run. **Don't commit this
+  file** (already in `.gitignore`). For production, set `LIDVALID_SECRET_KEY` as an env var instead
+  of relying on the local file.
