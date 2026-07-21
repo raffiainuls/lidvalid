@@ -10,16 +10,22 @@ services:
       - ./data:/app/data
     networks:
       - internal
-    # Lets the app container reach services bound to the VPS HOST's
-    # localhost (e.g. an `ssh -R 8123:...` reverse tunnel opened from a
-    # laptop) via the hostname `host.docker.internal` -- a container's own
-    # localhost is NOT the host's. Only relevant when a Connection is
-    # pointed at host.docker.internal (the SSH-reverse-tunnel path); once a
-    # dedicated OpenVPN client runs directly on the VPS host instead,
-    # Connections switch to the real private hostnames and this is unused
-    # (harmless to leave in either way).
+    # Lets the app container reach services bound to the VPS HOST (e.g. an
+    # `ssh -R 0.0.0.0:8123:...` reverse tunnel opened from a laptop) via the
+    # hostname `host.docker.internal` -- a container's own localhost is NOT
+    # the host's. Pinned to the `internal` network's own gateway IP (below)
+    # rather than Docker's `host-gateway` magic value: on this host that
+    # value resolved to the DEFAULT bridge's gateway (172.17.0.1), not this
+    # custom network's (172.28.1.1) -- the container has no route to the
+    # former since it's only attached to the latter. Also requires a
+    # matching `ufw allow from 172.28.1.0/24` on the VPS host, since ufw's
+    # default-deny INPUT policy blocks this bridge-to-host traffic otherwise
+    # (Docker's own iptables rules don't exempt it).
+    # Only relevant for the SSH-reverse-tunnel path; once a dedicated OpenVPN
+    # client runs directly on the VPS host instead, Connections switch to the
+    # real private hostnames and this goes unused (harmless to leave either way).
     extra_hosts:
-      - "host.docker.internal:host-gateway"
+      - "host.docker.internal:172.28.1.1"
 
   caddy:
     image: caddy:2-alpine
@@ -40,6 +46,10 @@ services:
 networks:
   internal:
     driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.1.0/24
+          gateway: 172.28.1.1
 
 volumes:
   caddy_data:
