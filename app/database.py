@@ -60,20 +60,12 @@ def init_db() -> None:
     from . import models  # noqa: F401 - register models on Base before create_all
     Base.metadata.create_all(bind=engine)
     if not _IS_SQLITE:
-        # The manual backfill below (from here to the `return`) uses
-        # `PRAGMA table_info`, which is SQLite-only syntax -- Postgres gets
-        # its own backfill instead. create_all() only ever creates brand-new
-        # TABLES; it never ALTERs one that already exists, so a column added
-        # to a model after this deployment already had live Postgres data
-        # (use_tunnel, added post-migration) still needs a manual backfill
-        # here, same reasoning as the SQLite block below. Postgres supports
-        # `ADD COLUMN IF NOT EXISTS` natively, so this is simpler than the
-        # PRAGMA-based check SQLite needs.
-        with engine.connect() as conn:
-            conn.execute(text(
-                "ALTER TABLE connections ADD COLUMN IF NOT EXISTS use_tunnel BOOLEAN DEFAULT FALSE"
-            ))
-            conn.commit()
+        # The manual backfill below uses `PRAGMA table_info`, which is
+        # SQLite-only syntax. Not needed on a non-SQLite target anyway: every
+        # column/index it backfills (column_type_details, event_log,
+        # owner_id, the findings_rowlevel index) is already declared directly
+        # on the model in models.py, so create_all() above creates them from
+        # scratch on a fresh schema -- there's nothing pre-dating them to fix.
         return
     # create_all() only creates brand-new tables -- it never alters a table
     # that already exists, so an Index/Column added to a model later (like
@@ -94,10 +86,6 @@ def init_db() -> None:
             conn.execute(text("ALTER TABLE run_tables ADD COLUMN column_type_details TEXT"))
         if "event_log" not in existing_cols:
             conn.execute(text("ALTER TABLE run_tables ADD COLUMN event_log TEXT"))
-
-        existing_conn_cols = {row[1] for row in conn.execute(text("PRAGMA table_info(connections)"))}
-        if "use_tunnel" not in existing_conn_cols:
-            conn.execute(text("ALTER TABLE connections ADD COLUMN use_tunnel BOOLEAN DEFAULT 0"))
 
         # owner_id backfill (per-user data scoping): added after connections/
         # validation_configs/runs already had rows with no notion of an owner.

@@ -90,7 +90,6 @@ export interface Connection {
   port: number;
   database: string;
   username: string;
-  use_tunnel: boolean;
   status: "unknown" | "ok" | "failed";
   last_tested_at: string | null;
   last_test_message: string;
@@ -104,7 +103,6 @@ export interface ConnectionInput {
   database: string;
   username: string;
   password: string;
-  use_tunnel: boolean;
 }
 
 export interface TestConnectionResult {

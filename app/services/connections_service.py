@@ -10,18 +10,10 @@ from validation_core.connectors import ConnectionParams, create_connector
 from .. import models, security
 
 
-_TUNNEL_ALIAS = "host.docker.internal"
-
-
 def to_connection_params(conn: models.Connection) -> ConnectionParams:
-    # use_tunnel routes the actual connection through the SSH reverse-tunnel
-    # alias (see docker-compose.yml's extra_hosts) instead of `conn.host` --
-    # `conn.host` itself stays the real, portable hostname (unaffected, still
-    # what's shown/edited in the UI and what a VPN-connected machine would use).
-    host = _TUNNEL_ALIAS if conn.use_tunnel else (conn.host or "")
     return ConnectionParams(
         engine=conn.engine,
-        host=host,
+        host=conn.host or "",
         port=conn.port or 0,
         database=conn.database or "",
         username=conn.username or "",

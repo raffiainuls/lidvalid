@@ -43,13 +43,6 @@ class Connection(Base):
     username = Column(String(255), default="")
     secret_encrypted = Column(LargeBinary, nullable=True)
     params = Column(JSON, default=dict)
-    # When true, actually connect via `host.docker.internal` instead of
-    # `host` above -- lets a Connection keep its real, portable hostname
-    # (works as-is on a machine with real VPN access) while THIS deployment
-    # reaches it through a local SSH reverse tunnel forwarded to that alias
-    # (see docker-compose.yml's `extra_hosts`). `host`/`port` stay the
-    # source of truth everywhere else (display, docs, other environments).
-    use_tunnel = Column(Boolean, default=False)
     status = Column(String(20), default="unknown")  # unknown | ok | failed
     last_tested_at = Column(DateTime, nullable=True)
     last_test_message = Column(Text, default="")

@@ -14,7 +14,6 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Checkbox } from "@/components/ui/checkbox";
 import {
   Select,
   SelectContent,
@@ -34,7 +33,6 @@ const schema = z.object({
   database: z.string(),
   username: z.string(),
   password: z.string(),
-  use_tunnel: z.boolean(),
 });
 
 type FormValues = z.infer<typeof schema>;
@@ -47,7 +45,6 @@ const EMPTY_VALUES: FormValues = {
   database: "",
   username: "",
   password: "",
-  use_tunnel: false,
 };
 
 export function ConnectionFormDialog({
@@ -89,7 +86,6 @@ export function ConnectionFormDialog({
               database: connection.database,
               username: connection.username,
               password: "",
-              use_tunnel: connection.use_tunnel,
             }
           : EMPTY_VALUES,
       );
@@ -97,7 +93,6 @@ export function ConnectionFormDialog({
   }, [open, connection, reset]);
 
   const engine = watch("engine");
-  const useTunnel = watch("use_tunnel");
 
   async function onSubmit(values: FormValues) {
     try {
@@ -181,23 +176,6 @@ export function ConnectionFormDialog({
               Password {isEdit && <span className="text-muted-foreground">(kosongkan bila tidak diubah)</span>}
             </Label>
             <Input id="password" type="password" autoComplete="new-password" {...register("password")} />
-          </div>
-
-          <div className="flex items-start gap-2">
-            <Checkbox
-              id="use_tunnel"
-              checked={useTunnel}
-              onCheckedChange={(v) => setValue("use_tunnel", v === true)}
-            />
-            <div className="grid gap-1">
-              <Label htmlFor="use_tunnel" className="font-normal">
-                Akses lewat tunnel VPS
-              </Label>
-              <p className="text-xs text-muted-foreground">
-                Aktifkan kalau host di atas cuma bisa diakses lewat VPN dan server ini tidak sedang
-                konek VPN — koneksi akan lewat SSH reverse tunnel yang sudah dibuka ke server ini.
-              </p>
-            </div>
           </div>
 
           <DialogFooter>

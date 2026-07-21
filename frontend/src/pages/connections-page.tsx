@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { toast } from "sonner";
-import { Plus, ArrowLeftRight } from "lucide-react";
+import { Plus } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -112,18 +112,8 @@ export default function ConnectionsPage() {
                       <TableCell className="font-medium">{conn.name}</TableCell>
                       <TableCell className="font-mono text-xs">{conn.engine}</TableCell>
                       <TableCell className="font-mono text-xs">
-                        <span className="inline-flex items-center gap-1.5">
-                          {conn.host}
-                          {conn.port ? `:${conn.port}` : ""}
-                          {conn.use_tunnel && (
-                            <span
-                              className="inline-flex items-center gap-0.5 rounded-full bg-status-off-bg px-1.5 py-0.5 text-[10px] text-status-off"
-                              title="Konek lewat SSH reverse tunnel, bukan langsung ke host ini"
-                            >
-                              <ArrowLeftRight className="size-2.5" /> tunnel
-                            </span>
-                          )}
-                        </span>
+                        {conn.host}
+                        {conn.port ? `:${conn.port}` : ""}
                       </TableCell>
                       <TableCell className="font-mono text-xs">{conn.database}</TableCell>
                       <TableCell>

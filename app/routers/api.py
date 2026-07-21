@@ -187,7 +187,6 @@ class ConnectionBody(BaseModel):
     database: str = ""
     username: str = ""
     password: str = ""
-    use_tunnel: bool = False
 
 
 def _serialize_connection(conn: models.Connection) -> dict:
@@ -199,7 +198,6 @@ def _serialize_connection(conn: models.Connection) -> dict:
         "port": conn.port,
         "database": conn.database,
         "username": conn.username,
-        "use_tunnel": conn.use_tunnel,
         "status": conn.status,
         "last_tested_at": conn.last_tested_at.isoformat() if conn.last_tested_at else None,
         "last_test_message": conn.last_test_message,
@@ -230,7 +228,6 @@ def api_create_connection(body: ConnectionBody, user: models.User = Depends(requ
         name=body.name, engine=body.engine, host=body.host, port=body.port,
         database=body.database, username=body.username,
         secret_encrypted=security.encrypt_secret(body.password) if body.password else None,
-        use_tunnel=body.use_tunnel,
     )
     db.add(conn)
     db.commit()
@@ -255,7 +252,6 @@ def api_update_connection(conn_id: int, body: ConnectionBody, user: models.User 
         raise HTTPException(status_code=409, detail=f'Nama koneksi "{body.name}" sudah dipakai, pilih nama lain')
     conn.name, conn.engine, conn.host = body.name, body.engine, body.host
     conn.port, conn.database, conn.username = body.port, body.database, body.username
-    conn.use_tunnel = body.use_tunnel
     if body.password:
         conn.secret_encrypted = security.encrypt_secret(body.password)
     db.commit()
