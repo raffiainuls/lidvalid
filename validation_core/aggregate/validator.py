@@ -315,8 +315,33 @@ class AggregateValidator:
             except Exception:
                 pass
 
-        df["validate_completeness"] = df["source_completeness"] == df["target_completeness"]
-        df["validate_uniqueness"] = df["source_uniqueness"] == df["target_uniqueness"]
+        # A raw == here is not NaN-safe: a column's completeness/uniqueness
+        # ratio is COUNT(...)/COUNT(*), which is NaN on both sides for a
+        # table that's empty on both source and target -- `nan == nan` is
+        # `False` in Python, so every column would be miscoded as a
+        # mismatch (fabricating one FindingAggregate row each) even though
+        # "identically undefined on both sides" isn't a real discrepancy.
+        # NOT values_match() here -- its ceil_stat rounding is meant for
+        # cross-engine SUM/MIN/MAX precision noise on largish numbers, and
+        # would collapse any two ratios in this column's 0..1 range to the
+        # same integer (e.g. 0.5 and 1.0 both ceil to 1), silently hiding
+        # real completeness/uniqueness differences. These ratios are already
+        # rounded to 4dp above, so plain equality is correct once NaN-vs-NaN
+        # is special-cased as a match.
+        def _ratio_match(a, b) -> bool:
+            a_na, b_na = pd.isna(a), pd.isna(b)
+            if a_na and b_na:
+                return True
+            if a_na or b_na:
+                return False
+            return a == b
+
+        df["validate_completeness"] = df.apply(
+            lambda r: _ratio_match(r["source_completeness"], r["target_completeness"]), axis=1
+        )
+        df["validate_uniqueness"] = df.apply(
+            lambda r: _ratio_match(r["source_uniqueness"], r["target_uniqueness"]), axis=1
+        )
         return df.reset_index(drop=True)
 
     # ------------------------------------------------------------- Report 3
@@ -474,9 +499,37 @@ class AggregateValidator:
         return []
 
     # ------------------------------------------------------------- Report 4/5
-    def gen_report_period_breakdown(self, granularity: str, shared_cols: list[tuple[str, str, str | None]] | None = None) -> pd.DataFrame:
-        src_expr = self.source.dialect.period_expr(self.date_column, granularity)
-        tgt_expr = self.target.dialect.period_expr(self.date_column, granularity)
+    def gen_report_period_breakdown(
+        self, granularity: str, shared_cols: list[tuple[str, str, str | None]] | None = None,
+        date_col_types: tuple[str, str] | None = None,
+    ) -> pd.DataFrame:
+        # Bucket a FLOORED/CEILED expression, not the raw column -- mirrors
+        # exactly what _period_stat_selects/_col_metric_selects already do
+        # for the same date_column's stat metrics. Without this, a non-NULL
+        # sentinel date survives the IS NOT NULL filter and produces a
+        # nonsense bucket (real incident: MySQL's zero-date '0000-00-00'
+        # formats to the literal period string "0000-00", which then reads
+        # as a bogus row-count/stat MISMATCH against a target that never
+        # stored that sentinel at all). date_floor_1970 clamps it to a real
+        # date on engines that support GREATEST/LEAST-style flooring (MySQL
+        # included), same as it already does for pre-1970 ClickHouse dates.
+        src_col, tgt_col = self.date_column, self.date_column
+        if date_col_types:
+            src_type, tgt_type = date_col_types
+            src_cat, tgt_cat = get_category(str(src_type)), get_category(str(tgt_type))
+            date_bound, ts_bound = self._date_ceiling_bounds(src_type, tgt_type)
+            if src_cat in ("date", "timestamp"):
+                bound = date_bound if src_cat == "date" else ts_bound
+                src_col = self.source.dialect.date_ceiling(
+                    self.source.dialect.date_floor_1970(self.date_column, src_cat), src_cat, bound,
+                )
+            if tgt_cat in ("date", "timestamp"):
+                bound = date_bound if tgt_cat == "date" else ts_bound
+                tgt_col = self.target.dialect.date_ceiling(
+                    self.target.dialect.date_floor_1970(self.date_column, tgt_cat), tgt_cat, bound,
+                )
+        src_expr = self.source.dialect.period_expr(src_col, granularity)
+        tgt_expr = self.target.dialect.period_expr(tgt_col, granularity)
 
         stat_col_cats = shared_cols or []
         src_stat_select = tgt_stat_select = ""
@@ -659,9 +712,11 @@ class AggregateValidator:
 
         if self.date_column and not self.settings.skip_period_breakdown:
             shared_cols = self._shared_stat_cols(df)
+            date_row = df[df["column_name"] == self.date_column].iloc[0]
+            date_col_types = (date_row["source_column_type"], date_row["target_column_type"])
             investigate_query = self._gen_investigate_query(shared_cols)
-            monthly = self.gen_report_period_breakdown("monthly", shared_cols)
-            yearly = self.gen_report_period_breakdown("yearly", shared_cols)
+            monthly = self.gen_report_period_breakdown("monthly", shared_cols, date_col_types)
+            yearly = self.gen_report_period_breakdown("yearly", shared_cols, date_col_types)
 
         return AggregateResult(
             table_details=table_details,
