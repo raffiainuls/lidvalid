@@ -27,6 +27,11 @@ interface Scenario {
   source: DemoRow[];
   target: DemoRow[];
   missingId: number | null;
+  /** which side is MISSING the row -- "target" = present in source only (the
+   * common case, e.g. a row that never made it through the pipeline);
+   * "source" = present in target only (e.g. a manual correction inserted
+   * straight into the warehouse, bypassing the operational system). */
+  missingSide: "target" | "source";
   diffs: DiffSpot[];
   /** column used for the completeness/uniqueness narrative in step 2 */
   focusColumn: string;
@@ -54,6 +59,7 @@ const SCENARIO_ECOMMERCE: Scenario = {
     { id: 105, pelanggan: "Dewi Lestari", total: 125000, tanggal: "2026-01-13" },
   ],
   missingId: 103,
+  missingSide: "target",
   diffs: [{ id: 104, column: "tanggal" }],
   focusColumn: "pelanggan",
 };
@@ -86,6 +92,7 @@ const SCENARIO_MIGRASI: Scenario = {
     { id: 205, produk: "Dompet Kulit", harga: 145000, kategori: "Aksesoris" },
   ],
   missingId: null,
+  missingSide: "target",
   diffs: [
     { id: 203, column: "kategori" },
     { id: 204, column: "harga" },
@@ -93,7 +100,67 @@ const SCENARIO_MIGRASI: Scenario = {
   focusColumn: "kategori",
 };
 
-const SCENARIOS = [SCENARIO_ECOMMERCE, SCENARIO_MIGRASI];
+// The cleanest possible "count sama, tapi ada yang beda" case: nothing else
+// is wrong AT ALL -- no missing rows, no nulls, no other columns off -- just
+// ONE status value that went stale during sync. Isolating the lesson from
+// scenario 2 (which bundles a null AND a numeric diff together).
+const SCENARIO_CRM: Scenario = {
+  key: "crm",
+  tabLabel: "Sinkronisasi Data Pelanggan",
+  columns: [
+    { key: "nama", label: "nama", type: "string" },
+    { key: "email", label: "email", type: "string" },
+    { key: "status", label: "status", type: "string" },
+  ],
+  source: [
+    { id: 301, nama: "Ahmad Fauzi", email: "ahmad@mail.com", status: "Aktif" },
+    { id: 302, nama: "Bunga Citra", email: "bunga@mail.com", status: "Aktif" },
+    { id: 303, nama: "Doni Pratama", email: "doni@mail.com", status: "Nonaktif" },
+    { id: 304, nama: "Eka Wulandari", email: "eka@mail.com", status: "Aktif" },
+  ],
+  target: [
+    { id: 301, nama: "Ahmad Fauzi", email: "ahmad@mail.com", status: "Aktif" },
+    { id: 302, nama: "Bunga Citra", email: "bunga@mail.com", status: "Aktif" },
+    { id: 303, nama: "Doni Pratama", email: "doni@mail.com", status: "Aktif" },
+    { id: 304, nama: "Eka Wulandari", email: "eka@mail.com", status: "Aktif" },
+  ],
+  missingId: null,
+  missingSide: "target",
+  diffs: [{ id: 303, column: "status" }],
+  focusColumn: "status",
+};
+
+// Missing rows don't only go one direction -- here the warehouse has a row
+// the operational source never had (e.g. a manual adjustment entered
+// straight into the target), the mirror image of scenario 1's "missing in
+// target". LidValid's Tier2 catches BOTH missing_in_source and
+// missing_in_target, not just the more intuitive direction.
+const SCENARIO_FINANCE: Scenario = {
+  key: "finance",
+  tabLabel: "Rekonsiliasi Pembayaran",
+  columns: [
+    { key: "kode", label: "kode", type: "string" },
+    { key: "jumlah", label: "jumlah", type: "number" },
+    { key: "waktu", label: "waktu", type: "date" },
+  ],
+  source: [
+    { id: 501, kode: "TRX-A1", jumlah: 500000, waktu: "2026-02-01" },
+    { id: 502, kode: "TRX-A2", jumlah: 750000, waktu: "2026-02-02" },
+    { id: 503, kode: "TRX-A3", jumlah: 620000, waktu: "2026-02-03" },
+  ],
+  target: [
+    { id: 501, kode: "TRX-A1", jumlah: 500000, waktu: "2026-02-01" },
+    { id: 502, kode: "TRX-A2", jumlah: 750000, waktu: "2026-02-02" },
+    { id: 503, kode: "TRX-A3", jumlah: 620000, waktu: "2026-02-03" },
+    { id: 504, kode: "TRX-A4-MANUAL", jumlah: 100000, waktu: "2026-02-04" },
+  ],
+  missingId: 504,
+  missingSide: "source",
+  diffs: [],
+  focusColumn: "kode",
+};
+
+const SCENARIOS = [SCENARIO_ECOMMERCE, SCENARIO_MIGRASI, SCENARIO_CRM, SCENARIO_FINANCE];
 
 const rupiah = (n: number) => `Rp${n.toLocaleString("id-ID")}`;
 const tgl = (d: string) =>
@@ -145,17 +212,27 @@ function MatchPill({ ok, children }: { ok: boolean; children: React.ReactNode })
 
 function DemoTable({
   title,
+  side,
   rows,
   columns,
   step,
   scenario,
 }: {
   title: string;
+  side: "source" | "target";
   rows: DemoRow[];
   columns: ColumnDef[];
   step: StepKey;
   scenario: Scenario;
 }) {
+  // The row is PRESENT on this side (so it gets highlighted) only when this
+  // side is NOT the one missing it -- e.g. missingSide="target" means the
+  // row exists on the source side, so that's where it's highlighted, and the
+  // placeholder ("tidak ada di sini") renders on the target side instead.
+  const missingIsHere = step === "missing" && scenario.missingId !== null && scenario.missingSide === side;
+  const missingIsPresentHere =
+    step === "missing" && scenario.missingId !== null && scenario.missingSide !== side;
+
   return (
     <div className="flex-1 rounded-xl border bg-card p-4 shadow-sm">
       <div className="mb-3 flex items-center gap-2 font-mono text-xs text-muted-foreground uppercase">
@@ -174,7 +251,7 @@ function DemoTable({
         </thead>
         <tbody>
           {rows.map((r) => {
-            const isMissingHighlight = step === "missing" && r.id === scenario.missingId;
+            const isMissingHighlight = missingIsPresentHere && r.id === scenario.missingId;
             const rowDiffs = step === "diff" ? scenario.diffs.filter((d) => d.id === r.id) : [];
             return (
               <tr
@@ -205,7 +282,7 @@ function DemoTable({
               </tr>
             );
           })}
-          {step === "missing" && scenario.missingId !== null && (
+          {missingIsHere && (
             <tr className="border-t border-dashed">
               <td colSpan={columns.length + 1} className="py-1.5 text-center text-xs text-status-fail">
                 (id {scenario.missingId} tidak ada di sini)
@@ -271,11 +348,25 @@ export function ValidationDemo() {
       </div>
 
       <div className="flex flex-col gap-4 sm:flex-row">
-        <DemoTable title={`Source (${source.length} baris)`} rows={source} columns={columns} step={step} scenario={scenario} />
+        <DemoTable
+          title={`Source (${source.length} baris)`}
+          side="source"
+          rows={source}
+          columns={columns}
+          step={step}
+          scenario={scenario}
+        />
         <div className="hidden items-center justify-center sm:flex">
           <ArrowRight className="size-5 text-muted-foreground" />
         </div>
-        <DemoTable title={`Target (${target.length} baris)`} rows={target} columns={columns} step={step} scenario={scenario} />
+        <DemoTable
+          title={`Target (${target.length} baris)`}
+          side="target"
+          rows={target}
+          columns={columns}
+          step={step}
+          scenario={scenario}
+        />
       </div>
 
       {/* Result panel + manual nav -- content swaps per step, this is the "animation" */}
@@ -355,9 +446,14 @@ export function ValidationDemo() {
               {missingId !== null ? (
                 <>
                   Tier 1 gagal → eskalasi ke Tier 2: baris{" "}
-                  <span className="font-mono font-semibold text-status-fail">id {missingId}</span> ada di Source
-                  tapi <span className="font-semibold text-status-fail">hilang di Target</span> — lengkap key-nya,
-                  siap disalin ke query investigasi.
+                  <span className="font-mono font-semibold text-status-fail">id {missingId}</span> ada di{" "}
+                  {scenario.missingSide === "target" ? "Source" : "Target"} tapi{" "}
+                  <span className="font-semibold text-status-fail">
+                    hilang di {scenario.missingSide === "target" ? "Target" : "Source"}
+                  </span>{" "}
+                  {scenario.missingSide === "source" &&
+                    "(kebalikan dari skenario lain -- masuk manual ke sisi ini, tidak lewat sumbernya) "}
+                  — lengkap key-nya, siap disalin ke query investigasi.
                 </>
               ) : (
                 <>
@@ -370,20 +466,28 @@ export function ValidationDemo() {
           )}
           {step === "diff" && (
             <div className="space-y-1.5 text-sm text-muted-foreground">
-              {diffs.map((d) => {
-                const col = columns.find((c) => c.key === d.column)!;
-                const sv = source.find((r) => r.id === d.id)![d.column];
-                const tv = target.find((r) => r.id === d.id)![d.column];
-                return (
-                  <p key={`${d.id}-${d.column}`}>
-                    Baris <span className="font-mono font-semibold">id {d.id}</span> ada di kedua sisi, tapi kolom{" "}
-                    <span className="font-semibold">{d.column}</span> beda:{" "}
-                    <span className="font-mono text-status-fail">
-                      {formatCell(sv, col.type)} → {formatCell(tv, col.type)}
-                    </span>
-                  </p>
-                );
-              })}
+              {diffs.length ? (
+                diffs.map((d) => {
+                  const col = columns.find((c) => c.key === d.column)!;
+                  const sv = source.find((r) => r.id === d.id)![d.column];
+                  const tv = target.find((r) => r.id === d.id)![d.column];
+                  return (
+                    <p key={`${d.id}-${d.column}`}>
+                      Baris <span className="font-mono font-semibold">id {d.id}</span> ada di kedua sisi, tapi kolom{" "}
+                      <span className="font-semibold">{d.column}</span> beda:{" "}
+                      <span className="font-mono text-status-fail">
+                        {formatCell(sv, col.type)} → {formatCell(tv, col.type)}
+                      </span>
+                    </p>
+                  );
+                })
+              ) : (
+                <p>
+                  Tidak ada baris yang nilainya beda di skenario ini — satu-satunya masalah di sini adalah baris{" "}
+                  <span className="font-mono font-semibold">id {missingId}</span> yang cuma ada di salah satu sisi
+                  (lihat tahap sebelumnya).
+                </p>
+              )}
             </div>
           )}
         </div>
