@@ -183,3 +183,110 @@ class TestDateCeilingBounds:
             assert ts_bound is None
             # and NA on the ClickHouse side -> no bound at all
             assert v._date_ceiling_bounds("datetime", missing) == (None, None)
+
+
+class TestCompletenessNaNIsNotAMismatch:
+    """Real incident: a table with 0 rows on BOTH sides makes
+    COUNT(x)/COUNT(*) a NaN/NaN division on engines (ClickHouse) that return
+    a real float NaN rather than SQL NULL for 0/0 -- a raw `==` comparison
+    then miscodes "identically undefined on both sides" as a mismatch,
+    fabricating one FindingAggregate row per column (216 in the reported
+    incident) for a table that has no actual discrepancy at all."""
+
+    def test_nan_both_sides_is_not_flagged_as_mismatch(self):
+        import pandas as pd
+        from validation_core.connectors.clickhouse import ClickHouseDialect
+
+        class _Conn:
+            dialect = ClickHouseDialect()
+
+        validator = AggregateValidator(_Conn(), _Conn(), "", "t", "", "t")
+        nan = float("nan")
+        # Stand in for the real 0-row-both-sides query result -- avoids
+        # needing a live ClickHouse server to reproduce its 0/0 -> NaN
+        # division behavior (SQLite returns NULL for 0/0, not NaN, so the
+        # existing sqlite-backed fixtures can't reproduce this specific bug).
+        validator._run_source = lambda sql: pd.DataFrame({"col_completeness": [nan], "col_uniqueness": [nan]})
+        validator._run_target = lambda sql: pd.DataFrame({"col_completeness": [nan], "col_uniqueness": [nan]})
+
+        schema_df = pd.DataFrame({
+            "column_name": ["col"],
+            "source_column_type": ["String"],
+            "target_column_type": ["String"],
+        })
+
+        result_df = validator.gen_report_column_details(schema_df)
+        row = result_df[result_df["column_name"] == "col"].iloc[0]
+        assert bool(row["validate_completeness"]) is True
+        assert bool(row["validate_uniqueness"]) is True
+
+    def test_genuinely_different_completeness_is_still_flagged(self):
+        """The fix must not turn off real mismatch detection -- only the
+        both-NaN case is special-cased (via values_match, same as every
+        other comparison in this codebase)."""
+        import pandas as pd
+        from validation_core.connectors.clickhouse import ClickHouseDialect
+
+        class _Conn:
+            dialect = ClickHouseDialect()
+
+        validator = AggregateValidator(_Conn(), _Conn(), "", "t", "", "t")
+        validator._run_source = lambda sql: pd.DataFrame({"col_completeness": [1.0], "col_uniqueness": [1.0]})
+        validator._run_target = lambda sql: pd.DataFrame({"col_completeness": [0.5], "col_uniqueness": [1.0]})
+
+        schema_df = pd.DataFrame({
+            "column_name": ["col"],
+            "source_column_type": ["String"],
+            "target_column_type": ["String"],
+        })
+
+        result_df = validator.gen_report_column_details(schema_df)
+        row = result_df[result_df["column_name"] == "col"].iloc[0]
+        assert bool(row["validate_completeness"]) is False
+        assert bool(row["validate_uniqueness"]) is True
+
+
+class TestPeriodBucketingFloorsSentinelDates:
+    """Real incident: MySQL's zero-date sentinel '0000-00-00' is NOT NULL, so
+    it survives the `IS NOT NULL` filter, and DATE_FORMAT('0000-00-00', '%Y-%m')
+    returns the literal string '0000-00' -- a fake period bucket that then
+    reads as a spurious row-count/stat MISMATCH against a target that never
+    stored that sentinel. period_expr must bucket the same floored/ceiled
+    expression _period_stat_selects/_col_metric_selects already use for this
+    exact column, not the raw column."""
+
+    def test_monthly_query_floors_date_column_before_bucketing(self):
+        import pandas as pd
+        from validation_core.connectors.mysql import MySqlDialect
+
+        class _Conn:
+            dialect = MySqlDialect()
+
+        validator = AggregateValidator(_Conn(), _Conn(), "", "t", "", "t", date_column="created_at")
+        # Only the QUERY TEXT is under test -- no live DB needed.
+        validator._run_source = lambda sql: pd.DataFrame()
+        validator._run_target = lambda sql: pd.DataFrame()
+
+        validator.gen_report_period_breakdown("monthly", None, date_col_types=("date", "date"))
+
+        src_q = validator.queries["Monthly Breakdown Source"]
+        assert "DATE_FORMAT(GREATEST(created_at, '1970-01-01')" in src_q
+
+    def test_missing_date_col_types_falls_back_to_raw_column(self):
+        """Callers that don't pass the column's type skip flooring rather
+        than crash -- keeps the new parameter backward compatible."""
+        import pandas as pd
+        from validation_core.connectors.mysql import MySqlDialect
+
+        class _Conn:
+            dialect = MySqlDialect()
+
+        validator = AggregateValidator(_Conn(), _Conn(), "", "t", "", "t", date_column="created_at")
+        validator._run_source = lambda sql: pd.DataFrame()
+        validator._run_target = lambda sql: pd.DataFrame()
+
+        validator.gen_report_period_breakdown("monthly", None, date_col_types=None)
+
+        src_q = validator.queries["Monthly Breakdown Source"]
+        assert "GREATEST" not in src_q
+        assert "DATE_FORMAT(created_at," in src_q
