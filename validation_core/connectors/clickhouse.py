@@ -208,6 +208,22 @@ class ClickHouseConnector(Connector):
             f"Query (awal): {sql[:200]}"
         )
 
+    # ClickHouse allows Date/Date32/DateTime/DateTime64 values up to
+    # 2299-12-31 (see date_max_bound below), but clickhouse_connect's default
+    # ("native") read format converts them straight into pandas
+    # datetime64[ns] columns, which can only hold dates up to ~2262-04-11 --
+    # a real row anywhere in the result set at or past that ceiling (a
+    # DateTime64(9) sentinel value, in the incident that prompted this)
+    # overflows and crashes the ENTIRE query, not just that one cell. This
+    # only protects row-level chunk fetches (aggregate MIN/MAX already has
+    # its own mitigation via wrap_minmax_datetime/date_ceiling, since those
+    # queries know up front they're touching a date/timestamp column).
+    # "int" is the only non-"native" format these types support (no
+    # "string" option) -- it reads back raw ticks instead of failing, at the
+    # cost of the row-level diff showing an integer rather than a formatted
+    # date for whichever specific column/row hit the overflow.
+    _SAFE_DATETIME_FORMATS = {"*Date*": "int"}
+
     def query_df(self, sql: str) -> pd.DataFrame:
         from clickhouse_connect.driver.exceptions import StreamFailureError
 
@@ -220,7 +236,7 @@ class ClickHouseConnector(Connector):
         last_exc: Exception | None = None
         for attempt in range(1 + self.STREAM_RETRIES):
             try:
-                return self._client.query_df(sql)
+                return self._query_df_overflow_safe(sql)
             except StreamFailureError as exc:
                 last_exc = exc
                 if attempt < self.STREAM_RETRIES:
@@ -230,6 +246,12 @@ class ClickHouseConnector(Connector):
             self._stream_failure_msg(last_exc, sql)
             + f" (sudah dicoba ulang {self.STREAM_RETRIES}x dengan koneksi baru)"
         ) from last_exc
+
+    def _query_df_overflow_safe(self, sql: str) -> pd.DataFrame:
+        try:
+            return self._client.query_df(sql)
+        except (OverflowError, pd.errors.OutOfBoundsDatetime):
+            return self._client.query_df(sql, query_formats=self._SAFE_DATETIME_FORMATS)
 
     def query_df_stream(self, sql: str):
         # Streams native blocks in a single request -- no LIMIT/OFFSET pagination
