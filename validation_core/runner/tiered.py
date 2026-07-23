@@ -116,7 +116,10 @@ def run_table(
             raise ValueError(f"Unknown validation mode: {effective_mode}")
 
         on_event(ProgressEvent(kind="phase", message=f"{table.source_table}: Tier 2 row-level ({rl_mode})"))
-        rl_validator = RowLevelValidator(source, target, source_ref, target_ref, table, rl_mode, settings, on_event)
+        rl_validator = RowLevelValidator(
+            source, target, source_ref, target_ref, table, rl_mode, settings, on_event,
+            source_db=source_db, target_db=target_db,
+        )
         rowlevel_result = rl_validator.run()
         queries.update(rowlevel_result.queries)
 
