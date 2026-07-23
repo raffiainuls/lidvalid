@@ -73,6 +73,54 @@ def get_category(col_type: str) -> str:
     return 'string'
 
 
+def date_ceiling_bounds(source_dialect, target_dialect, source_type, target_type) -> tuple[str | None, str | None]:
+    """Resolve the tightest ClickHouse-storable ceiling for a date/timestamp
+    column pairing, split by category ('date' bound, 'timestamp' bound) so
+    each side's expression can be capped with a literal matching ITS OWN
+    category. Only whichever side(s) are ClickHouse contribute a bound (see
+    Dialect.date_max_bound); both entries are None when neither side is
+    ClickHouse — nothing to mirror, since no other engine here enforces a
+    comparable ceiling.
+
+    Shared by AggregateValidator (Report 2/3, MIN/MAX/stat columns) and
+    RowLevelValidator (chunk fetches) so both apply the identical clamp to
+    the identical column — a value ClickHouse silently truncated on ingest
+    must be capped the same way on BOTH sides, or a genuinely-later value
+    on the other engine would show as a false mismatch/diff. Also what
+    keeps a ClickHouse DateTime64(9) row at its own storage max (2299-12-31)
+    from ever reaching pandas as a raw value: pandas' datetime64[ns] only
+    goes up to ~2262-04-11, and clickhouse_connect's default read format
+    crashes the whole query if it tries to convert an out-of-range value
+    (real incident, see connectors/clickhouse.py's overflow-safe query_df
+    fallback -- this ceiling is the fix that keeps that fallback from ever
+    needing to trigger in the first place).
+    """
+    date_bound: str | None = None
+    ts_bound: str | None = None
+    for dialect, col_type in ((source_dialect, source_type), (target_dialect, target_type)):
+        # pd.isna FIRST, before any truthiness test: a one-sided column comes
+        # through a merged schema DataFrame as a missing value whose exact
+        # type depends on that frame's dtype -- np.nan (float) OR pd.NA
+        # (e.g. arrow/string-backed frames). `not pd.NA` raises "boolean
+        # value of NA is ambiguous" (real incident: datamart_orders_smdv).
+        import pandas as pd  # local import: keep this module importable without pandas at parse time
+
+        if col_type is None or pd.isna(col_type):
+            continue
+        col_type = str(col_type)
+        if not col_type:
+            continue
+        bound = dialect.date_max_bound(col_type)
+        if not bound:
+            continue
+        cat = get_category(col_type)
+        if cat == "date":
+            date_bound = bound if date_bound is None else min(date_bound, bound)
+        elif cat == "timestamp":
+            ts_bound = bound if ts_bound is None else min(ts_bound, bound)
+    return date_bound, ts_bound
+
+
 def ceil_stat(v) -> int:
     """Round a stat value up to an integer before comparing.
 

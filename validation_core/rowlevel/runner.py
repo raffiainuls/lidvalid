@@ -13,6 +13,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
+from ..categories import get_category, date_ceiling_bounds
 from ..connectors.base import Connector
 from ..models import RunSettings, TableSpec
 from .comparator import (
@@ -62,6 +63,8 @@ class RowLevelValidator:
         mode: str,
         settings: RunSettings | None = None,
         on_event: OnEvent = noop_on_event,
+        source_db: str = "",
+        target_db: str = "",
     ):
         self.source = source
         self.target = target
@@ -71,10 +74,53 @@ class RowLevelValidator:
         self.mode = "missing" if mode not in ("missing", "full") else mode
         self.settings = settings or RunSettings()
         self.on_event = on_event
+        # Only used for the date-ceiling schema lookup below -- optional/
+        # defaulted so existing callers (tests, any direct construction)
+        # that predate this don't need updating; a table pair with no
+        # date/timestamp key or value column never touches these at all.
+        self.source_db = source_db
+        self.target_db = target_db
         self.queries: dict[str, str] = {}
 
     def _emit(self, kind: str, message: str, **data) -> None:
         self.on_event(ProgressEvent(kind=kind, message=message, data=data))
+
+    def _compute_date_col_ceilings(
+        self, key_columns: list[str], value_columns: list[str],
+    ) -> dict[str, tuple[str, str | None]]:
+        """{column: (category, ceiling_bound)} for whichever key/value
+        columns are date/timestamp-typed on at least one side -- passed to
+        build_range_query_multi so those columns get the same
+        date_floor_1970/date_ceiling clamp the aggregate validator already
+        applies to MIN/MAX/stat columns (see categories.date_ceiling_bounds).
+        Best-effort: a schema-fetch failure just skips this (row-level ran
+        fine without it before this existed) rather than failing the run --
+        the overflow-safe fallback in ClickHouseConnector.query_df is still
+        there as a last resort if an unclamped value slips through."""
+        cols_to_check = set(key_columns) | set(value_columns)
+        if not cols_to_check:
+            return {}
+        try:
+            src_schema = self.source.get_schema(self.source_db, self.table.source_table)
+            tgt_schema = self.target.get_schema(self.target_db, self.table.target_table)
+            src_types = dict(zip(src_schema["column_name"], src_schema["column_type"]))
+            tgt_types = dict(zip(tgt_schema["column_name"], tgt_schema["column_type"]))
+        except Exception:
+            return {}
+
+        result: dict[str, tuple[str, str | None]] = {}
+        for col in cols_to_check:
+            src_type, tgt_type = src_types.get(col), tgt_types.get(col)
+            src_cat = get_category(str(src_type)) if src_type else None
+            tgt_cat = get_category(str(tgt_type)) if tgt_type else None
+            cat = src_cat if src_cat in ("date", "timestamp") else (
+                tgt_cat if tgt_cat in ("date", "timestamp") else None
+            )
+            if cat is None:
+                continue
+            date_bound, ts_bound = date_ceiling_bounds(self.source.dialect, self.target.dialect, src_type, tgt_type)
+            result[col] = (cat, date_bound if cat == "date" else ts_bound)
+        return result
 
     def run(self) -> RowLevelResult:
         key_columns = list(self.table.key_columns)
@@ -96,6 +142,8 @@ class RowLevelValidator:
             f"Validation mode: {self.mode} | key={key_columns} | chunk_column={chunk_column} ({scope})",
             value_columns=value_columns,
         )
+
+        date_col_ceilings = self._compute_date_col_ceilings(key_columns, value_columns)
 
         full_scan = False
         full_scan_reason = "not numeric"
@@ -174,8 +222,14 @@ class RowLevelValidator:
 
         for idx, (lo, hi) in enumerate(chunk_bounds, start=1):
             rng = "full-scan" if lo is None else f"{chunk_column}[{lo}-{hi}]"
-            q1 = build_range_query_multi(self.source.dialect, key_columns, value_columns, self.source_table_ref, chunk_column, lo, hi)
-            q2 = build_range_query_multi(self.target.dialect, key_columns, value_columns, self.target_table_ref, chunk_column, lo, hi)
+            q1 = build_range_query_multi(
+                self.source.dialect, key_columns, value_columns, self.source_table_ref, chunk_column, lo, hi,
+                date_col_ceilings,
+            )
+            q2 = build_range_query_multi(
+                self.target.dialect, key_columns, value_columns, self.target_table_ref, chunk_column, lo, hi,
+                date_col_ceilings,
+            )
             self.queries[f"Chunk {idx} Source"] = q1
             self.queries[f"Chunk {idx} Target"] = q2
 

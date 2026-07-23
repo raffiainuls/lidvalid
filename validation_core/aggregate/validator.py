@@ -17,7 +17,7 @@ from typing import Callable
 
 import pandas as pd
 
-from ..categories import get_category, values_match, META_COLUMNS
+from ..categories import get_category, values_match, date_ceiling_bounds, META_COLUMNS
 from ..connectors.base import Connector
 from ..models import RunSettings
 
@@ -214,43 +214,10 @@ class AggregateValidator:
 
     # ------------------------------------------------------- shared: dates
     def _date_ceiling_bounds(self, source_type, target_type) -> tuple[str | None, str | None]:
-        """Resolve the tightest ClickHouse-storable ceiling for a date/
-        timestamp column pairing, split by category ('date' bound, 'timestamp'
-        bound) so each side's expression can be capped with a literal that
-        matches ITS OWN category — avoids handing e.g. a datetime-with-time
-        bound to a plain-Date cast if the two sides happen to disagree on
-        category for the same column name (schema drift). Only whichever
-        side(s) are ClickHouse contribute a bound (see Dialect.date_max_bound);
-        both entries are None when neither side is ClickHouse — nothing to
-        mirror, since no other engine here enforces a comparable ceiling.
-        """
-        date_bound: str | None = None
-        ts_bound: str | None = None
-        for dialect, col_type in (
-            (self.source.dialect, source_type), (self.target.dialect, target_type),
-        ):
-            # pd.isna FIRST, before any truthiness test: a one-sided column
-            # comes through the merged schema as a missing value whose exact
-            # type depends on the DataFrame's dtype -- np.nan (float) OR
-            # pd.NA (e.g. arrow/string-backed frames). `not pd.NA` raises
-            # `TypeError: boolean value of NA is ambiguous`, which took down
-            # entire tables (real incident: datamart_orders_smdv) -- the old
-            # `isinstance(col_type, float)` guard never ran because the
-            # `not col_type` to its LEFT evaluated first.
-            if col_type is None or pd.isna(col_type):
-                continue
-            col_type = str(col_type)
-            if not col_type:
-                continue
-            bound = dialect.date_max_bound(col_type)
-            if not bound:
-                continue
-            cat = get_category(col_type)
-            if cat == "date":
-                date_bound = bound if date_bound is None else min(date_bound, bound)
-            elif cat == "timestamp":
-                ts_bound = bound if ts_bound is None else min(ts_bound, bound)
-        return date_bound, ts_bound
+        """Thin wrapper -- see categories.date_ceiling_bounds (shared with
+        RowLevelValidator, which applies the identical clamp to chunk
+        fetches, not just this class's MIN/MAX/stat columns)."""
+        return date_ceiling_bounds(self.source.dialect, self.target.dialect, source_type, target_type)
 
     # ------------------------------------------------------------- Report 2
     def _completeness_exprs(self, dialect, col: str, col_type: str, ceiling_bound: str | None) -> list[str]:

@@ -117,11 +117,35 @@ def build_range_query_multi(
     chunk_column: str,
     lo: int | None,
     hi: int | None,
+    date_col_ceilings: dict[str, tuple[str, str | None]] | None = None,
 ) -> str:
     """Fetch key + value columns for one id range. `lo is None` -> full-table
-    scan (used when there's no numeric column to chunk on)."""
+    scan (used when there's no numeric column to chunk on).
+
+    `date_col_ceilings` (optional): {column_name: (category, ceiling_bound)}
+    for whichever key/value columns are date/timestamp-typed on at least one
+    side -- see RowLevelValidator.run(). Those columns are wrapped in the
+    SAME date_floor_1970/date_ceiling clamp the aggregate validator already
+    applies to MIN/MAX/stat columns, so a value ClickHouse silently
+    truncated at ingest (or its own storage ceiling, e.g. DateTime64's
+    2299-12-31) is clamped identically on BOTH sides before either one is
+    fetched -- never reaching pandas as a raw out-of-range value that would
+    otherwise crash the whole query (pandas' datetime64[ns] ceiling is
+    ~2262-04-11, well under ClickHouse's), and never producing a false diff
+    from an unclamped genuinely-later value on the other engine either.
+    """
+    date_col_ceilings = date_col_ceilings or {}
     cols = list(key_columns) + list(value_columns)
-    sel = ", ".join(dialect.quote_ident(c) for c in cols)
+    parts = []
+    for c in cols:
+        ident = dialect.quote_ident(c)
+        if c in date_col_ceilings:
+            cat, bound = date_col_ceilings[c]
+            expr = dialect.date_ceiling(dialect.date_floor_1970(ident, cat), cat, bound)
+            parts.append(f"{expr} AS {ident}")
+        else:
+            parts.append(ident)
+    sel = ", ".join(parts)
     if lo is None:
         return f"SELECT {sel} FROM {table_ref}"
     c = dialect.quote_ident(chunk_column)
