@@ -1,5 +1,6 @@
 """Shared dataclasses used across aggregate/rowlevel/runner modules."""
 from __future__ import annotations
+from typing import Optional
 
 from dataclasses import dataclass, field
 
@@ -13,12 +14,12 @@ class TableSpec:
     source_table: str
     target_table: str
     key_columns: list[str] = field(default_factory=lambda: ["id"])
-    chunk_column: str | None = None  # default: key_columns[0]
-    date_column: str | None = None  # for aggregate period breakdown
+    chunk_column: Optional[str] = None  # default: key_columns[0]
+    date_column: Optional[str] = None  # for aggregate period breakdown
     exclude_columns: list[str] = field(default_factory=list)
-    mode_override: str | None = None  # aggregate | rowlevel_missing | rowlevel_full | tiered
-    start_date: str | None = None
-    end_date: str | None = None
+    mode_override: Optional[str] = None  # aggregate | rowlevel_missing | rowlevel_full | tiered
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
     enabled: bool = True
     note: str = ""
 

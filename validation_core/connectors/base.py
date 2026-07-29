@@ -7,6 +7,7 @@ reports instead of the mysql/clickhouse if-else branching the original
 `db_validator.py` had baked in. A `Connector` wraps the actual DB client.
 """
 from __future__ import annotations
+from typing import Optional
 
 import time
 from abc import ABC, abstractmethod
@@ -60,7 +61,7 @@ class Dialect:
         """
         return expr
 
-    def date_ceiling(self, expr: str, category: str, max_value: str | None) -> str:
+    def date_ceiling(self, expr: str, category: str, max_value: Optional[str]) -> str:
         """Cap a date/timestamp expression at `max_value`, the upper bound
         of whichever side of this comparison is ClickHouse (the only engine
         here with a hard storage-enforced ceiling — see
@@ -71,7 +72,7 @@ class Dialect:
         """
         return expr
 
-    def date_max_bound(self, col_type: str) -> str | None:
+    def date_max_bound(self, col_type: str) -> Optional[str]:
         """This engine's hard storage-enforced upper bound for `col_type`,
         or None if the engine has no such limit worth mirroring (MySQL
         DATE/DATETIME reach year 9999, SQLite has no limit at all — neither

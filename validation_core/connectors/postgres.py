@@ -5,6 +5,7 @@ storage, see app/database.py) via SQLAlchemy, same create_engine/pd.read_sql
 shape as MySqlConnector.
 """
 from __future__ import annotations
+from typing import Optional
 
 import pandas as pd
 from sqlalchemy import create_engine
@@ -31,7 +32,7 @@ class PostgresDialect(Dialect):
     def date_floor_1970(self, expr: str, category: str) -> str:
         return f"GREATEST({expr}, '1970-01-01')"
 
-    def date_ceiling(self, expr: str, category: str, max_value: str | None) -> str:
+    def date_ceiling(self, expr: str, category: str, max_value: Optional[str]) -> str:
         if not max_value:
             return expr
         return f"LEAST({expr}, '{max_value}')"

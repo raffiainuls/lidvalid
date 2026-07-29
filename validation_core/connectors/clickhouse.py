@@ -5,6 +5,7 @@ toString wrapping) and `validation_database/running_validation.py`
 (`fetch_data_clickhouse` streaming fetch, reserved-word backtick quoting).
 """
 from __future__ import annotations
+from typing import Optional
 
 import re
 
@@ -99,7 +100,7 @@ class ClickHouseDialect(Dialect):
         # https://github.com/ClickHouse/ClickHouse/issues/65039
         return f"if(isNull({expr}), NULL, greatest({expr}, {lit}))"
 
-    def date_ceiling(self, expr: str, category: str, max_value: str | None) -> str:
+    def date_ceiling(self, expr: str, category: str, max_value: Optional[str]) -> str:
         if not max_value:
             return expr
         caster = "toDate" if category == "date" else "toDateTime"
@@ -233,7 +234,7 @@ class ClickHouseConnector(Connector):
         # client (fresh connection) and re-run. Without this, one desynced
         # chunk killed the whole table, and the table-level retry re-ran
         # Tier 1 + every earlier chunk from scratch.
-        last_exc: Exception | None = None
+        last_exc: Optional[Exception] = None
         for attempt in range(1 + self.STREAM_RETRIES):
             try:
                 return self._query_df_overflow_safe(sql)

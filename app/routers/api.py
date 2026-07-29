@@ -6,6 +6,7 @@ rather than a redirect, since a fetch() call can't usefully follow one.
 from __future__ import annotations
 
 import re
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import FileResponse, PlainTextResponse
@@ -301,10 +302,10 @@ class ConfigTableRow(BaseModel):
     source_table: str
     target_table: str
     key_columns: list[str] = ["id"]
-    chunk_column: str | None = None
-    date_column: str | None = None
+    chunk_column: Optional[str] = None
+    date_column: Optional[str] = None
     exclude_columns: list[str] = []
-    mode_override: str | None = None
+    mode_override: Optional[str] = None
     enabled: bool = True
 
 
@@ -672,7 +673,7 @@ def _serialize_config_share(s: models.ConfigShare) -> dict:
     }
 
 
-def _require_config_owner_or_admin(cfg: models.ValidationConfig | None, user: models.User) -> None:
+def _require_config_owner_or_admin(cfg: Optional[models.ValidationConfig], user: models.User) -> None:
     """Only the true owner (or an admin) manages WHO a config is shared
     with -- unlike view/run/edit access to the config's data itself, share
     management is never delegated by a share (an "edit"-tier collaborator

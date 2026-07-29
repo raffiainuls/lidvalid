@@ -6,6 +6,7 @@ drop, connection reset) rather than a real data/config problem, so one
 transient hiccup didn't fail the rest of a long batch.
 """
 from __future__ import annotations
+from typing import Optional
 
 import time
 from typing import Callable, TypeVar
@@ -33,12 +34,12 @@ def is_transient_error(exc: Exception) -> bool:
 def run_with_retry(
     fn: Callable[[], T],
     settings: RunSettings,
-    on_retry: Callable[[int, Exception, float], None] | None = None,
+    on_retry: Optional[Callable[[int, Exception, float], None]] = None,
 ) -> tuple[T, int]:
     """Run `fn()`, retrying on transient errors. Returns (result, attempts_used).
     Raises the last exception if every attempt fails (or the error isn't
     classified as transient)."""
-    last_err: Exception | None = None
+    last_err: Optional[Exception] = None
     for attempt in range(1, settings.retry_max + 1):
         try:
             return fn(), attempt

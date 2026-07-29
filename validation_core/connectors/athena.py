@@ -13,6 +13,7 @@ onto this app's fixed Connection shape:
                  (work_group optional, defaults to "primary")
 """
 from __future__ import annotations
+from typing import Optional
 
 import pandas as pd
 from pyathena import connect
@@ -33,7 +34,7 @@ class AthenaDialect(Dialect):
             return f"GREATEST({expr}, DATE '1970-01-01')"
         return f"GREATEST({expr}, TIMESTAMP '1970-01-01 00:00:00')"
 
-    def date_ceiling(self, expr: str, category: str, max_value: str | None) -> str:
+    def date_ceiling(self, expr: str, category: str, max_value: Optional[str]) -> str:
         if not max_value:
             return expr
         if category == "date":

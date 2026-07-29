@@ -18,6 +18,7 @@ tested end-to-end). Verify against a real project before relying on the
 date-clamping/period-breakdown reports for this engine.
 """
 from __future__ import annotations
+from typing import Optional
 
 import pandas as pd
 from odps import ODPS
@@ -35,7 +36,7 @@ class MaxComputeDialect(Dialect):
     def date_floor_1970(self, expr: str, category: str) -> str:
         return f"GREATEST({expr}, TO_DATE('1970-01-01', 'yyyy-mm-dd'))"
 
-    def date_ceiling(self, expr: str, category: str, max_value: str | None) -> str:
+    def date_ceiling(self, expr: str, category: str, max_value: Optional[str]) -> str:
         if not max_value:
             return expr
         value = max_value.split(" ")[0]  # MaxCompute DATETIME has second precision; date-only bound is enough here

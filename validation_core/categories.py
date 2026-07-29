@@ -73,7 +73,9 @@ def get_category(col_type: str) -> str:
     return 'string'
 
 
-def date_ceiling_bounds(source_dialect, target_dialect, source_type, target_type) -> tuple[str | None, str | None]:
+from typing import Optional, Tuple
+
+def date_ceiling_bounds(source_dialect, target_dialect, source_type, target_type) -> Tuple[Optional[str], Optional[str]]:
     """Resolve the tightest ClickHouse-storable ceiling for a date/timestamp
     column pairing, split by category ('date' bound, 'timestamp' bound) so
     each side's expression can be capped with a literal matching ITS OWN
@@ -95,8 +97,8 @@ def date_ceiling_bounds(source_dialect, target_dialect, source_type, target_type
     fallback -- this ceiling is the fix that keeps that fallback from ever
     needing to trigger in the first place).
     """
-    date_bound: str | None = None
-    ts_bound: str | None = None
+    date_bound: Optional[str] = None
+    ts_bound: Optional[str] = None
     for dialect, col_type in ((source_dialect, source_type), (target_dialect, target_type)):
         # pd.isna FIRST, before any truthiness test: a one-sided column comes
         # through a merged schema DataFrame as a missing value whose exact

@@ -16,6 +16,7 @@ import traceback
 from collections import deque
 from concurrent.futures import CancelledError, ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
+from typing import Optional
 
 import pandas as pd
 from sqlalchemy.orm import Session
@@ -119,8 +120,8 @@ def to_table_spec(ct: models.ConfigTable) -> TableSpec:
 def create_run(
     db: Session,
     config: models.ValidationConfig,
-    mode: str | None = None,
-    table_filter: list[str] | None = None,
+    mode: Optional[str] = None,
+    table_filter: Optional[list[str]] = None,
     trigger_type: str = "manual",
 ) -> models.Run:
     run = models.Run(
@@ -166,7 +167,7 @@ RESUME_SCOPES = {
 }
 
 
-def resume_run(db: Session, finished_run: models.Run, scope: str = "non_pass") -> models.Run | None:
+def resume_run(db: Session, finished_run: models.Run, scope: str = "non_pass") -> Optional[models.Run]:
     """Create a new run re-validating tables from `finished_run` selected by
     `scope` (see RESUME_SCOPES): "all" every table, "fail" only FAIL,
     "error" only ERROR, "non_pass" everything that isn't PASS (default, and

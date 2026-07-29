@@ -4,6 +4,7 @@ password hashing for local user accounts. No external auth dependency
 avoids a native-extension install risk.
 """
 from __future__ import annotations
+from typing import Optional
 
 import hashlib
 import hmac
@@ -45,7 +46,7 @@ def encrypt_secret(plaintext: str) -> bytes:
     return _fernet.encrypt(plaintext.encode("utf-8"))
 
 
-def decrypt_secret(ciphertext: bytes | None) -> str:
+def decrypt_secret(ciphertext: Optional[bytes]) -> str:
     if not ciphertext:
         return ""
     return _fernet.decrypt(ciphertext).decode("utf-8")

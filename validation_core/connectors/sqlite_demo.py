@@ -10,6 +10,7 @@ same period-expr contract) so the aggregate/rowlevel engines exercise real
 code paths end-to-end in tests and in `scripts/seed_demo.py`, not mocks.
 """
 from __future__ import annotations
+from typing import Optional
 
 import sqlite3
 
@@ -33,7 +34,7 @@ class SqliteDialect(Dialect):
         # semantics as GREATEST() on ISO-formatted date strings.
         return f"MAX({expr}, '1970-01-01')"
 
-    def date_ceiling(self, expr: str, category: str, max_value: str | None) -> str:
+    def date_ceiling(self, expr: str, category: str, max_value: Optional[str]) -> str:
         if not max_value:
             return expr
         # SQLite MIN() with 2+ args is the scalar (row-wise) min -- mirrors

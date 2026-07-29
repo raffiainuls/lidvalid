@@ -8,6 +8,7 @@ memory stays bounded to one chunk at a time. Falls back to a single
 full-table scan when the chunk column isn't numeric.
 """
 from __future__ import annotations
+from typing import Optional
 
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -61,7 +62,7 @@ class RowLevelValidator:
         target_table_ref: str,
         table: TableSpec,
         mode: str,
-        settings: RunSettings | None = None,
+        settings: Optional[RunSettings] = None,
         on_event: OnEvent = noop_on_event,
         source_db: str = "",
         target_db: str = "",
@@ -87,7 +88,7 @@ class RowLevelValidator:
 
     def _compute_date_col_ceilings(
         self, key_columns: list[str], value_columns: list[str],
-    ) -> dict[str, tuple[str, str | None]]:
+    ) -> dict[str, tuple[str, Optional[str]]]:
         """{column: (category, ceiling_bound)} for whichever key/value
         columns are date/timestamp-typed on at least one side -- passed to
         build_range_query_multi so those columns get the same
@@ -108,7 +109,7 @@ class RowLevelValidator:
         except Exception:
             return {}
 
-        result: dict[str, tuple[str, str | None]] = {}
+        result: dict[str, tuple[str, Optional[str]]] = {}
         for col in cols_to_check:
             src_type, tgt_type = src_types.get(col), tgt_types.get(col)
             src_cat = get_category(str(src_type)) if src_type else None

@@ -1,5 +1,6 @@
 """Bridges the `connections` ORM table to validation_core Connectors."""
 from __future__ import annotations
+from typing import Optional
 
 from datetime import datetime, timezone
 
@@ -39,7 +40,7 @@ def test_connection(conn: models.Connection) -> dict:
 
 
 def test_connection_payload(engine: str, host: str, port: int, database: str,
-                             username: str, password: str, params: dict | None = None) -> dict:
+                             username: str, password: str, params: Optional[dict] = None) -> dict:
     """Test a connection without persisting it first (Add-connection form)."""
     try:
         connector = create_connector(ConnectionParams(

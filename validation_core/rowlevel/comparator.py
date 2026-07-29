@@ -10,6 +10,7 @@ hundred thousand rows and is dropped (see
 docs/validation-platform/01-analisa-existing.md §7).
 """
 from __future__ import annotations
+from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -89,7 +90,7 @@ def detect_value_columns(
     target: Connector,
     target_table_ref: str,
     key_columns: list[str],
-    exclude_columns: list[str] | None = None,
+    exclude_columns: Optional[list[str]] = None,
 ) -> list[str]:
     """Columns present in BOTH tables, excluding key column(s) and pipeline
     meta columns. Order follows the source table."""
@@ -115,9 +116,9 @@ def build_range_query_multi(
     value_columns: list[str],
     table_ref: str,
     chunk_column: str,
-    lo: int | None,
-    hi: int | None,
-    date_col_ceilings: dict[str, tuple[str, str | None]] | None = None,
+    lo: Optional[int],
+    hi: Optional[int],
+    date_col_ceilings: Optional[dict[str, tuple[str, Optional[str]]]] = None,
 ) -> str:
     """Fetch key + value columns for one id range. `lo is None` -> full-table
     scan (used when there's no numeric column to chunk on).

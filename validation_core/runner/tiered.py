@@ -4,6 +4,7 @@ concept from docs/validation-platform/02-prd.md §6, the reason these two
 tools are being unified instead of just run side by side.
 """
 from __future__ import annotations
+from typing import Optional
 
 import time
 import traceback
@@ -23,15 +24,15 @@ class TableRunResult:
     status: str  # PASS | FAIL | ERROR
     tier_reached: int  # 1 = aggregate only, 2 = row-level also ran
     mode: str
-    aggregate: AggregateResult | None = None
-    aggregate_summary: dict | None = None
-    rowlevel: RowLevelResult | None = None
-    error: str | None = None
+    aggregate: Optional[AggregateResult] = None
+    aggregate_summary: Optional[dict] = None
+    rowlevel: Optional[RowLevelResult] = None
+    error: Optional[str] = None
     # Full traceback for ERROR results. Kept separate from `error` (the
     # short one-line reason shown inline in tables/headers) so the web
     # layer can show the short form everywhere and the full trace only in
     # the drilldown Log tab.
-    error_trace: str | None = None
+    error_trace: Optional[str] = None
     attempts: int = 1
     duration_s: float = 0.0
     queries: dict[str, str] = field(default_factory=dict)
@@ -44,7 +45,7 @@ def run_table(
     target_db: str,
     table: TableSpec,
     run_mode: str,
-    settings: RunSettings | None = None,
+    settings: Optional[RunSettings] = None,
     on_event: OnEvent = noop_on_event,
 ) -> TableRunResult:
     """Validate one source/target table pair according to `run_mode`
@@ -80,9 +81,9 @@ def run_table(
         def on_query(label: str, sql: str) -> None:
             queries[label] = sql
 
-        aggregate_result: AggregateResult | None = None
-        aggregate_summary: dict | None = None
-        rowlevel_result: RowLevelResult | None = None
+        aggregate_result: Optional[AggregateResult] = None
+        aggregate_summary: Optional[dict] = None
+        rowlevel_result: Optional[RowLevelResult] = None
         tier = 1
         status = "ERROR"
 

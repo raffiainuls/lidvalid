@@ -7,6 +7,7 @@ name (passed as a query param, not the URL path -- Oracle Cloud/RDS/12c+
 PDBs are addressed by service_name, not the legacy SID).
 """
 from __future__ import annotations
+from typing import Optional
 
 import pandas as pd
 from sqlalchemy import create_engine
@@ -52,7 +53,7 @@ class OracleDialect(Dialect):
     def date_floor_1970(self, expr: str, category: str) -> str:
         return f"GREATEST({expr}, {_dt_literal('1970-01-01', category)})"
 
-    def date_ceiling(self, expr: str, category: str, max_value: str | None) -> str:
+    def date_ceiling(self, expr: str, category: str, max_value: Optional[str]) -> str:
         if not max_value:
             return expr
         return f"LEAST({expr}, {_dt_literal(max_value, category)})"
@@ -124,7 +125,7 @@ class OracleConnector(Connector):
         return df
 
     @staticmethod
-    def _split_owner(table: str, database: str) -> tuple[str | None, str]:
+    def _split_owner(table: str, database: str) -> tuple[Optional[str], str]:
         if "." in table:
             owner, name = table.split(".", 1)
             return owner.upper(), name.upper()

@@ -11,6 +11,7 @@ docs/validation-platform/01-analisa-existing.md §2.3 for the full list and
 each dialect method's docstring for the specific fix it encodes.
 """
 from __future__ import annotations
+from typing import Optional
 
 from dataclasses import dataclass, field
 from typing import Callable
@@ -30,7 +31,7 @@ class AggregateResult:
     tgt_type_details: pd.DataFrame
     monthly_breakdown: pd.DataFrame
     yearly_breakdown: pd.DataFrame
-    investigate_query: str | None
+    investigate_query: Optional[str]
     queries: dict[str, str] = field(default_factory=dict)
 
     # --- derived summary, mirrors run_batch.py's _build_summary / _calc_stat_mismatch ---
@@ -128,11 +129,11 @@ class AggregateValidator:
         source_table: str,
         target_db: str,
         target_table: str,
-        date_column: str | None = None,
-        start_date: str | None = None,
-        end_date: str | None = None,
-        settings: RunSettings | None = None,
-        on_query: Callable[[str, str], None] | None = None,
+        date_column: Optional[str] = None,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+        settings: Optional[RunSettings] = None,
+        on_query: Optional[Callable[[str, str], None]] = None,
     ):
         self.source = source
         self.target = target
@@ -213,14 +214,14 @@ class AggregateValidator:
         }
 
     # ------------------------------------------------------- shared: dates
-    def _date_ceiling_bounds(self, source_type, target_type) -> tuple[str | None, str | None]:
+    def _date_ceiling_bounds(self, source_type, target_type) -> tuple[Optional[str], Optional[str]]:
         """Thin wrapper -- see categories.date_ceiling_bounds (shared with
         RowLevelValidator, which applies the identical clamp to chunk
         fetches, not just this class's MIN/MAX/stat columns)."""
         return date_ceiling_bounds(self.source.dialect, self.target.dialect, source_type, target_type)
 
     # ------------------------------------------------------------- Report 2
-    def _completeness_exprs(self, dialect, col: str, col_type: str, ceiling_bound: str | None) -> list[str]:
+    def _completeness_exprs(self, dialect, col: str, col_type: str, ceiling_bound: Optional[str]) -> list[str]:
         cat = get_category(col_type)
         q = dialect.quote_ident(col)
         if cat == "string":
@@ -312,7 +313,7 @@ class AggregateValidator:
         return df.reset_index(drop=True)
 
     # ------------------------------------------------------------- Report 3
-    def _col_metric_selects(self, dialect, col: str, col_type: str, ceiling_bound: str | None) -> list[str]:
+    def _col_metric_selects(self, dialect, col: str, col_type: str, ceiling_bound: Optional[str]) -> list[str]:
         cat = get_category(col_type)
         q = dialect.quote_ident(col)
         parts = [f"COUNT({q}) AS {col}_count"]
@@ -404,7 +405,7 @@ class AggregateValidator:
         return pd.DataFrame(src_rows), pd.DataFrame(tgt_rows)
 
     # ------------------------------------------------------- shared helpers
-    def _shared_stat_cols(self, df: pd.DataFrame) -> list[tuple[str, str, str | None]]:
+    def _shared_stat_cols(self, df: pd.DataFrame) -> list[tuple[str, str, Optional[str]]]:
         """[(col, category, ceiling_bound), ...] for shared non-meta columns
         with equal category. `ceiling_bound` is precomputed here (rather than
         re-derived per dialect call) since both sides' raw types are only
@@ -448,7 +449,7 @@ class AggregateValidator:
                 return prefix.rstrip("_"), alias[len(prefix):]
         return alias, ""  # pragma: no cover - unreachable given known generators
 
-    def _period_stat_selects(self, dialect, col: str, cat: str, ceiling_bound: str | None = None) -> list[str]:
+    def _period_stat_selects(self, dialect, col: str, cat: str, ceiling_bound: Optional[str] = None) -> list[str]:
         q = dialect.quote_ident(col)
         if cat in ("numeric", "boolean"):
             return [f"SUM({q}) AS sum_{col}", f"MIN({q}) AS min_{col}", f"MAX({q}) AS max_{col}"]
@@ -467,8 +468,8 @@ class AggregateValidator:
 
     # ------------------------------------------------------------- Report 4/5
     def gen_report_period_breakdown(
-        self, granularity: str, shared_cols: list[tuple[str, str, str | None]] | None = None,
-        date_col_types: tuple[str, str] | None = None,
+        self, granularity: str, shared_cols: Optional[list[tuple[str, str, Optional[str]]]] = None,
+        date_col_types: Optional[tuple[str, str]] = None,
     ) -> pd.DataFrame:
         # Bucket a FLOORED/CEILED expression, not the raw column -- mirrors
         # exactly what _period_stat_selects/_col_metric_selects already do
@@ -567,7 +568,7 @@ class AggregateValidator:
         return merged
 
     # ------------------------------------------------------- investigate SQL
-    def _gen_investigate_query(self, shared_cols: list[tuple[str, str, str | None]]) -> str | None:
+    def _gen_investigate_query(self, shared_cols: list[tuple[str, str, Optional[str]]]) -> Optional[str]:
         if not self.date_column or not shared_cols:
             return None
         dcol = self.date_column

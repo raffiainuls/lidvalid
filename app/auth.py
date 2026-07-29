@@ -4,6 +4,7 @@ this app runs single-process behind whatever reverse proxy/VPN already
 gates access to the internal tools it replaces.
 """
 from __future__ import annotations
+from typing import Optional
 
 import hmac
 
@@ -14,7 +15,7 @@ from . import models
 from .database import get_db
 
 
-def get_current_user(request: Request, db: Session = Depends(get_db)) -> models.User | None:
+def get_current_user(request: Request, db: Session = Depends(get_db)) -> Optional[models.User]:
     user_id = request.session.get("user_id")
     if not user_id:
         return None
@@ -96,13 +97,13 @@ def check_owner(obj, user: models.User) -> None:
 PERMISSION_RANK = {"view": 0, "run": 1, "edit": 2}
 
 
-def get_config_share(db: Session, config_id: int, user_id: int) -> models.ConfigShare | None:
+def get_config_share(db: Session, config_id: int, user_id: int) -> Optional[models.ConfigShare]:
     return db.query(models.ConfigShare).filter_by(config_id=config_id, user_id=user_id).first()
 
 
 def check_config_access(
-    db: Session, config: models.ValidationConfig | None, user: models.User, need: str = "view",
-) -> models.ConfigShare | None:
+    db: Session, config: Optional[models.ValidationConfig], user: models.User, need: str = "view",
+) -> Optional[models.ConfigShare]:
     """404 if `config` doesn't exist and the user has no access at all; 403
     if they have a share but it's below the `need` tier. Returns the
     ConfigShare row when access comes from a share, or None when it's the
