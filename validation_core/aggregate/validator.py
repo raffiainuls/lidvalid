@@ -520,28 +520,67 @@ class AggregateValidator:
         tgt_expr = self.target.dialect.period_expr(tgt_col, granularity)
 
         stat_col_cats = shared_cols or []
-        src_stat_select = tgt_stat_select = ""
-        if stat_col_cats:
-            src_parts = [s for c, cat, bound in stat_col_cats for s in self._period_stat_selects(self.source.dialect, c, cat, bound)]
-            tgt_parts = [s for c, cat, bound in stat_col_cats for s in self._period_stat_selects(self.target.dialect, c, cat, bound)]
-            src_stat_select = ", " + ", ".join(src_parts)
-            tgt_stat_select = ", " + ", ".join(tgt_parts)
 
-        src_q = (
-            f"SELECT {src_expr} AS period, COUNT(*) AS source_row{src_stat_select} "
-            f"FROM {self._table_ref('source')}{self._null_filter('source')} "
-            f"GROUP BY period ORDER BY period"
-        )
-        tgt_q = (
-            f"SELECT {tgt_expr} AS period, COUNT(*) AS target_row{tgt_stat_select} "
-            f"FROM {self._table_ref('target')}{self._null_filter('target')} "
-            f"GROUP BY period ORDER BY period"
-        )
-        self._log_query(f"{granularity.capitalize()} Breakdown Source", src_q)
-        self._log_query(f"{granularity.capitalize()} Breakdown Target", tgt_q)
+        # Batch the per-period stat aggregates the same way Reports 2/3 batch
+        # their column metrics: a wide table produces ~3 exprs per column, so
+        # a single "period, COUNT(*), <all stats> GROUP BY period" query can
+        # carry 40+ SUM/MIN/MAX/DATEDIFF and kill the MySQL connection
+        # (error 2013) over a VPN. Each batch is its own GROUP-BY-period query
+        # keeping `period` + a slice of the stat columns; because every batch
+        # applies the identical filter and grouping, they yield the same set
+        # of periods and outer-merge back together losslessly on `period`.
+        def _run_period_batched(period_expr, row_alias, dialect, table_ref, null_filter, side):
+            batch_size = self.settings.aggregate_column_batch_size
+            col_parts = [
+                self._period_stat_selects(dialect, c, cat, bound)
+                for c, cat, bound in stat_col_cats
+            ]
+            col_parts = [p for p in col_parts if p]
+            base_select = f"{period_expr} AS period, COUNT(*) AS {row_alias}"
+            n_batches = max(1, (len(col_parts) + batch_size - 1) // batch_size)
 
-        src_df = self._run_source(src_q)
-        tgt_df = self._run_target(tgt_q)
+            def _log(i, q):
+                base = f"{granularity.capitalize()} Breakdown {side.capitalize()}"
+                self._log_query(base if n_batches == 1 else f"{base} (Batch {i + 1})", q)
+
+            if not col_parts:
+                q = (f"SELECT {base_select} FROM {table_ref}{null_filter} "
+                     f"GROUP BY period ORDER BY period")
+                _log(0, q)
+                df = self._run_source(q) if side == "source" else self._run_target(q)
+                if "period" in df.columns:
+                    df["period"] = df["period"].astype(str)
+                return df
+
+            dfs = []
+            for bi, i in enumerate(range(0, len(col_parts), batch_size)):
+                batch_stats = [p for parts in col_parts[i:i + batch_size] for p in parts]
+                # Only the first batch carries the row count; the rest just
+                # re-derive `period` so they can merge back.
+                head = base_select if bi == 0 else f"{period_expr} AS period"
+                q = (f"SELECT {head}, {', '.join(batch_stats)} "
+                     f"FROM {table_ref}{null_filter} GROUP BY period ORDER BY period")
+                _log(bi, q)
+                df = self._run_source(q) if side == "source" else self._run_target(q)
+                if "period" in df.columns:
+                    df["period"] = df["period"].astype(str)
+                dfs.append(df)
+
+            result = dfs[0]
+            for df in dfs[1:]:
+                if "period" not in df.columns:
+                    continue
+                result = pd.merge(result, df, on="period", how="outer")
+            return result
+
+        src_df = _run_period_batched(
+            src_expr, "source_row", self.source.dialect,
+            self._table_ref("source"), self._null_filter("source"), "source",
+        )
+        tgt_df = _run_period_batched(
+            tgt_expr, "target_row", self.target.dialect,
+            self._table_ref("target"), self._null_filter("target"), "target",
+        )
 
         if "period" not in src_df.columns:
             src_df = pd.DataFrame(columns=["period", "source_row"])
