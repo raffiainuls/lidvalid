@@ -68,6 +68,19 @@ class RunSettings:
     # due to memory/timeout from doing too many COUNT(DISTINCT)s at once.
     # 5 columns = ~10-15 expressions, much safer over VPN / small instances.
     aggregate_column_batch_size: int = 5
+    # Cap on COUNT(DISTINCT ...) expressions per query in Reports 2 & 3.
+    # The real driver of MySQL "Lost connection" (2013) on these reports is
+    # NOT the column count but the COUNT(DISTINCT) count: each one forces a
+    # full per-column sort/scan of the whole table, and a handful in a single
+    # query over a slow/VPN link runs long enough to drop the connection
+    # mid-stream (real incident: a 5-column batch on
+    # training_smile5.ws_stock_opnames still failed because all 5 columns
+    # carried a COUNT(DISTINCT) uniqueness metric). Cheap metrics
+    # (completeness, SUM/MIN/MAX) still batch up to aggregate_column_batch_size
+    # worth of expressions; only the heavy DISTINCTs are throttled by this.
+    # 1 = one COUNT(DISTINCT) per query (safest; each is a single-column
+    # scan). Raise it for small/local tables to cut round-trips.
+    aggregate_distinct_batch_size: int = 1
 
 
 VALID_MODES = ("aggregate", "rowlevel_missing", "rowlevel_full", "tiered")

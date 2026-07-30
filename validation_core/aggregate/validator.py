@@ -183,6 +183,59 @@ class AggregateValidator:
     def _run_target(self, sql: str) -> pd.DataFrame:
         return self.target.query_df(sql)
 
+    @staticmethod
+    def _distinct_cost(parts: list[str]) -> int:
+        """How many COUNT(DISTINCT ...) expressions a column's part-list
+        carries. These are the expensive ones (full per-column sort/scan) and
+        are throttled separately from cheap aggregates -- see
+        RunSettings.aggregate_distinct_batch_size."""
+        return sum(1 for p in parts if "COUNT(DISTINCT" in p.upper())
+
+    def _cost_batches(self, col_parts: list[list[str]]) -> list[list[list[str]]]:
+        """Group per-column part-lists into query batches that respect BOTH
+        caps: at most aggregate_column_batch_size columns AND at most
+        aggregate_distinct_batch_size COUNT(DISTINCT) expressions per batch.
+        The DISTINCT cap is what actually prevents the MySQL 2013 drop; the
+        column cap keeps the non-distinct batches from growing unbounded."""
+        col_cap = self.settings.aggregate_column_batch_size
+        dist_cap = max(1, self.settings.aggregate_distinct_batch_size)
+        batches: list[list[list[str]]] = []
+        cur: list[list[str]] = []
+        cur_dist = 0
+        for parts in col_parts:
+            d = self._distinct_cost(parts)
+            would_overflow = cur and (
+                len(cur) >= col_cap or (cur_dist + d > dist_cap and cur_dist > 0)
+            )
+            if would_overflow:
+                batches.append(cur)
+                cur, cur_dist = [], 0
+            cur.append(parts)
+            cur_dist += d
+        if cur:
+            batches.append(cur)
+        return batches
+
+    def _run_col_batches(self, col_parts: list[list[str]], side: str, label_base: str) -> pd.DataFrame:
+        """Run one no-GROUP-BY aggregate query per cost-aware batch and stitch
+        the single-row results side by side. Shared by Reports 2 & 3."""
+        col_parts = [p for p in col_parts if p]
+        if not col_parts:
+            return pd.DataFrame()
+        batches = self._cost_batches(col_parts)
+        table_ref = self._table_ref(side)
+        date_filter = self._date_filter(side)
+        dfs = []
+        for i, batch in enumerate(batches):
+            exprs = [p for parts in batch for p in parts]
+            q = f"SELECT {', '.join(exprs)} FROM {table_ref}{date_filter}"
+            label = f"{label_base} {side.capitalize()}"
+            if len(batches) > 1:
+                label += f" (Batch {i + 1})"
+            self._log_query(label, q)
+            dfs.append(self._run_source(q) if side == "source" else self._run_target(q))
+        return pd.concat(dfs, axis=1) if dfs else pd.DataFrame()
+
     def get_schema_source(self) -> pd.DataFrame:
         df = self.source.get_schema(self.source_db, self.source_table)
         return df.rename(columns={"column_type": "source_column_type"})
@@ -246,31 +299,17 @@ class AggregateValidator:
             date_bound, ts_bound = self._date_ceiling_bounds(source_type, df.loc[col, "target_column_type"])
             cat = get_category(source_type)
             bound = date_bound if cat == "date" else (ts_bound if cat == "timestamp" else None)
-            src_parts += self._completeness_exprs(self.source.dialect, col, source_type, bound)
+            src_parts.append(self._completeness_exprs(self.source.dialect, col, source_type, bound))
         tgt_parts = []
         for col in tgt_cols:
             target_type = str(df.loc[col, "target_column_type"])
             date_bound, ts_bound = self._date_ceiling_bounds(df.loc[col, "source_column_type"], target_type)
             cat = get_category(target_type)
             bound = date_bound if cat == "date" else (ts_bound if cat == "timestamp" else None)
-            tgt_parts += self._completeness_exprs(self.target.dialect, col, target_type, bound)
+            tgt_parts.append(self._completeness_exprs(self.target.dialect, col, target_type, bound))
 
-        def _run_batched(parts: list[str], table_ref: str, date_filter: str, side: str) -> pd.DataFrame:
-            if not parts:
-                return pd.DataFrame()
-            dfs = []
-            batch_size = self.settings.aggregate_column_batch_size * 2  # *2 because each col has 2 parts (comp/uniq)
-            for i in range(0, len(parts), batch_size):
-                batch = parts[i:i + batch_size]
-                q = f"SELECT {', '.join(batch)} FROM {table_ref}{date_filter}"
-                # Append batch index to label if more than 1 batch to avoid key collisions in self.queries
-                label = f"Column Details {side.capitalize()}" if len(parts) <= batch_size else f"Column Details {side.capitalize()} (Batch {i//batch_size + 1})"
-                self._log_query(label, q)
-                dfs.append(self._run_source(q) if side == "source" else self._run_target(q))
-            return pd.concat(dfs, axis=1) if dfs else pd.DataFrame()
-
-        src_result = _run_batched(src_parts, self._table_ref("source"), self._date_filter("source"), "source")
-        tgt_result = _run_batched(tgt_parts, self._table_ref("target"), self._date_filter("target"), "target")
+        src_result = self._run_col_batches(src_parts, "source", "Column Details")
+        tgt_result = self._run_col_batches(tgt_parts, "target", "Column Details")
 
         df["source_completeness"] = None
         df["source_uniqueness"] = None
@@ -384,23 +423,8 @@ class AggregateValidator:
             if parts:
                 tgt_col_parts.append(parts)
 
-        def _run_batched(col_parts: list[list[str]], table_ref: str, date_filter: str, side: str) -> pd.DataFrame:
-            if not col_parts:
-                return pd.DataFrame()
-            dfs = []
-            batch_size = self.settings.aggregate_column_batch_size
-            for i in range(0, len(col_parts), batch_size):
-                batch_parts = [p for parts in col_parts[i:i + batch_size] for p in parts]
-                if not batch_parts:
-                    continue
-                q = f"SELECT {', '.join(batch_parts)} FROM {table_ref}{date_filter}"
-                label = f"Column Type Details {side.capitalize()}" if len(col_parts) <= batch_size else f"Column Type Details {side.capitalize()} (Batch {i//batch_size + 1})"
-                self._log_query(label, q)
-                dfs.append(self._run_source(q) if side == "source" else self._run_target(q))
-            return pd.concat(dfs, axis=1) if dfs else pd.DataFrame()
-
-        src_result = _run_batched(src_col_parts, self._table_ref("source"), self._date_filter("source"), "source")
-        tgt_result = _run_batched(tgt_col_parts, self._table_ref("target"), self._date_filter("target"), "target")
+        src_result = self._run_col_batches(src_col_parts, "source", "Column Type Details")
+        tgt_result = self._run_col_batches(tgt_col_parts, "target", "Column Type Details")
 
         src_rows, tgt_rows = [], []
         src_names = src_cols_df["column_name"].tolist()
