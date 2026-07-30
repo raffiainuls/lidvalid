@@ -290,3 +290,73 @@ class TestPeriodBucketingFloorsSentinelDates:
         src_q = validator.queries["Monthly Breakdown Source"]
         assert "GREATEST" not in src_q
         assert "DATE_FORMAT(created_at," in src_q
+
+
+class TestPeriodBreakdownBatching:
+    """Regression: a wide table's period breakdown put ALL per-period stat
+    aggregates (3 exprs per numeric column) into ONE `GROUP BY period` query.
+    Real incident: training_smile5.ws_entity_material_activities produced 40+
+    SUM/MIN/MAX/DATEDIFF in a single query and killed the MySQL connection
+    (error 2013) over a VPN. The stat columns must be split into batches of
+    at most aggregate_column_batch_size columns, each its own GROUP-BY-period
+    query, then merged back on `period` with no data loss."""
+
+    def _wide_validator(self, batch_size):
+        import pandas as pd
+        from validation_core.connectors.mysql import MySqlDialect
+
+        class _Conn:
+            dialect = MySqlDialect()
+
+        v = AggregateValidator(
+            _Conn(), _Conn(), "", "t", "", "t", date_column="created_at",
+            settings=RunSettings(aggregate_column_batch_size=batch_size),
+        )
+        # Each batch query returns the same two periods so the outer-merge is
+        # lossless; every stat column echoes its own name as the value so we
+        # can assert nothing was dropped or duplicated in the merge.
+        import re
+
+        def _fake(sql, side):
+            select = sql.split("SELECT ", 1)[1].split(" FROM ", 1)[0]
+            aliases = re.findall(r" AS (\w+)", select)
+            row = {}
+            for a in aliases:
+                if a == "period":
+                    continue
+                row[a] = 1 if a in ("source_row", "target_row") else hash(a) % 1000
+            return pd.DataFrame([{"period": "2024-01", **row}, {"period": "2024-02", **row}])
+
+        v._run_source = lambda sql: _fake(sql, "source")
+        v._run_target = lambda sql: _fake(sql, "target")
+        return v
+
+    def test_wide_stats_are_split_into_capped_batches(self):
+        v = self._wide_validator(batch_size=3)
+        cols = [(f"n{i}", "numeric", None) for i in range(10)]  # 10 cols x 3 exprs = 30
+        v.gen_report_period_breakdown("monthly", cols, date_col_types=None)
+
+        batch_labels = [k for k in v.queries if k.startswith("Monthly Breakdown Source (Batch")]
+        assert len(batch_labels) == 4, f"10 cols / batch 3 -> 4 batches, got {batch_labels}"
+        # No single query may exceed batch_size columns' worth of SUM()s.
+        for label in batch_labels:
+            assert v.queries[label].count("SUM(") <= 3 * 3
+
+    def test_single_batch_keeps_unnumbered_label(self):
+        v = self._wide_validator(batch_size=10)
+        cols = [(f"n{i}", "numeric", None) for i in range(3)]
+        v.gen_report_period_breakdown("monthly", cols, date_col_types=None)
+        assert "Monthly Breakdown Source" in v.queries
+        assert not any(k.startswith("Monthly Breakdown Source (Batch") for k in v.queries)
+
+    def test_batched_merge_preserves_all_stat_columns(self):
+        v = self._wide_validator(batch_size=3)
+        cols = [(f"n{i}", "numeric", None) for i in range(10)]
+        merged = v.gen_report_period_breakdown("monthly", cols, date_col_types=None)
+        # every column's sum/min/max survives the batch merge, both sides
+        for i in range(10):
+            for pref in ("src_sum_", "src_min_", "src_max_", "tgt_sum_", "tgt_min_", "tgt_max_"):
+                assert f"{pref}n{i}" in merged.columns, f"missing {pref}n{i} after batch merge"
+        # row count carried only by the first batch still lands correctly
+        assert merged["source_row"].tolist() == [1, 1]
+        assert merged["target_row"].tolist() == [1, 1]
