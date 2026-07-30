@@ -63,6 +63,7 @@ class RunSettings:
     retry_backoff_seconds: int = 20
     heartbeat_seconds: int = 30
     rowlevel_sample_cap: int = 10_000
+    aggregate_column_batch_size: int = 20
 
 
 VALID_MODES = ("aggregate", "rowlevel_missing", "rowlevel_full", "tiered")

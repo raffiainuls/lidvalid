@@ -255,15 +255,22 @@ class AggregateValidator:
             bound = date_bound if cat == "date" else (ts_bound if cat == "timestamp" else None)
             tgt_parts += self._completeness_exprs(self.target.dialect, col, target_type, bound)
 
-        src_result, tgt_result = pd.DataFrame(), pd.DataFrame()
-        if src_parts:
-            src_q = f"SELECT {', '.join(src_parts)} FROM {self._table_ref('source')}{self._date_filter('source')}"
-            self._log_query("Column Details Source", src_q)
-            src_result = self._run_source(src_q)
-        if tgt_parts:
-            tgt_q = f"SELECT {', '.join(tgt_parts)} FROM {self._table_ref('target')}{self._date_filter('target')}"
-            self._log_query("Column Details Target", tgt_q)
-            tgt_result = self._run_target(tgt_q)
+        def _run_batched(parts: list[str], table_ref: str, date_filter: str, side: str) -> pd.DataFrame:
+            if not parts:
+                return pd.DataFrame()
+            dfs = []
+            batch_size = self.settings.aggregate_column_batch_size * 2  # *2 because each col has 2 parts (comp/uniq)
+            for i in range(0, len(parts), batch_size):
+                batch = parts[i:i + batch_size]
+                q = f"SELECT {', '.join(batch)} FROM {table_ref}{date_filter}"
+                # Append batch index to label if more than 1 batch to avoid key collisions in self.queries
+                label = f"Column Details {side.capitalize()}" if len(parts) <= batch_size else f"Column Details {side.capitalize()} (Batch {i//batch_size + 1})"
+                self._log_query(label, q)
+                dfs.append(self._run_source(q) if side == "source" else self._run_target(q))
+            return pd.concat(dfs, axis=1) if dfs else pd.DataFrame()
+
+        src_result = _run_batched(src_parts, self._table_ref("source"), self._date_filter("source"), "source")
+        tgt_result = _run_batched(tgt_parts, self._table_ref("target"), self._date_filter("target"), "target")
 
         df["source_completeness"] = None
         df["source_uniqueness"] = None
@@ -357,30 +364,43 @@ class AggregateValidator:
         src_cols_df = df[df["source_column_type"].notna()][["column_name", "source_column_type"]]
         tgt_cols_df = df[df["target_column_type"].notna()][["column_name", "target_column_type"]]
 
-        src_parts = []
+        # Map each column to its metric parts so we can chunk by column count
+        src_col_parts = []
         for _, row in src_cols_df.iterrows():
             col, source_type = row["column_name"], row["source_column_type"]
             date_bound, ts_bound = self._date_ceiling_bounds(source_type, df.loc[col, "target_column_type"])
             cat = get_category(str(source_type))
             bound = date_bound if cat == "date" else (ts_bound if cat == "timestamp" else None)
-            src_parts += self._col_metric_selects(self.source.dialect, col, source_type, bound)
-        tgt_parts = []
+            parts = self._col_metric_selects(self.source.dialect, col, source_type, bound)
+            if parts:
+                src_col_parts.append(parts)
+        tgt_col_parts = []
         for _, row in tgt_cols_df.iterrows():
             col, target_type = row["column_name"], row["target_column_type"]
             date_bound, ts_bound = self._date_ceiling_bounds(df.loc[col, "source_column_type"], target_type)
             cat = get_category(str(target_type))
             bound = date_bound if cat == "date" else (ts_bound if cat == "timestamp" else None)
-            tgt_parts += self._col_metric_selects(self.target.dialect, col, target_type, bound)
+            parts = self._col_metric_selects(self.target.dialect, col, target_type, bound)
+            if parts:
+                tgt_col_parts.append(parts)
 
-        src_result, tgt_result = pd.DataFrame(), pd.DataFrame()
-        if src_parts:
-            src_q = f"SELECT {', '.join(src_parts)} FROM {self._table_ref('source')}{self._date_filter('source')}"
-            self._log_query("Column Type Details Source", src_q)
-            src_result = self._run_source(src_q)
-        if tgt_parts:
-            tgt_q = f"SELECT {', '.join(tgt_parts)} FROM {self._table_ref('target')}{self._date_filter('target')}"
-            self._log_query("Column Type Details Target", tgt_q)
-            tgt_result = self._run_target(tgt_q)
+        def _run_batched(col_parts: list[list[str]], table_ref: str, date_filter: str, side: str) -> pd.DataFrame:
+            if not col_parts:
+                return pd.DataFrame()
+            dfs = []
+            batch_size = self.settings.aggregate_column_batch_size
+            for i in range(0, len(col_parts), batch_size):
+                batch_parts = [p for parts in col_parts[i:i + batch_size] for p in parts]
+                if not batch_parts:
+                    continue
+                q = f"SELECT {', '.join(batch_parts)} FROM {table_ref}{date_filter}"
+                label = f"Column Type Details {side.capitalize()}" if len(col_parts) <= batch_size else f"Column Type Details {side.capitalize()} (Batch {i//batch_size + 1})"
+                self._log_query(label, q)
+                dfs.append(self._run_source(q) if side == "source" else self._run_target(q))
+            return pd.concat(dfs, axis=1) if dfs else pd.DataFrame()
+
+        src_result = _run_batched(src_col_parts, self._table_ref("source"), self._date_filter("source"), "source")
+        tgt_result = _run_batched(tgt_col_parts, self._table_ref("target"), self._date_filter("target"), "target")
 
         src_rows, tgt_rows = [], []
         src_names = src_cols_df["column_name"].tolist()
