@@ -292,6 +292,84 @@ class TestPeriodBucketingFloorsSentinelDates:
         assert "DATE_FORMAT(created_at," in src_q
 
 
+class TestDistinctThrottling:
+    """Regression: Report 2's 5-column batch STILL dropped the MySQL
+    connection (error 2013) on training_smile5.ws_stock_opnames, because all
+    5 columns carried a COUNT(DISTINCT) uniqueness metric. The real cost
+    driver is the number of COUNT(DISTINCT) per query (each is a full
+    per-column sort/scan), not the column count. aggregate_distinct_batch_size
+    caps DISTINCTs per query independently of the column cap."""
+
+    def _validator(self, distinct_cap, col_cap=5):
+        import pandas as pd
+        from validation_core.connectors.mysql import MySqlDialect
+
+        class _Conn:
+            dialect = MySqlDialect()
+
+        v = AggregateValidator(
+            _Conn(), _Conn(), "", "t", "", "t",
+            settings=RunSettings(
+                aggregate_column_batch_size=col_cap,
+                aggregate_distinct_batch_size=distinct_cap,
+            ),
+        )
+        v._issued = []
+
+        def _fake(sql):
+            v._issued.append(sql)
+            select = sql.split("SELECT ", 1)[1].split(" FROM ", 1)[0]
+            import re
+            aliases = re.findall(r" AS (\w+)", select)
+            return pd.DataFrame([{a: 1.0 for a in aliases}])
+
+        v._run_source = _fake
+        v._run_target = _fake
+        return v
+
+    def _string_schema(self, n):
+        import pandas as pd
+        cols = [f"c{i}" for i in range(n)]
+        return pd.DataFrame({
+            "column_name": cols,
+            "source_column_type": ["varchar(255)"] * n,
+            "target_column_type": ["varchar(255)"] * n,
+        })
+
+    def test_report2_caps_distinct_per_query(self):
+        # 6 string columns => 6 COUNT(DISTINCT). With cap=1, every issued
+        # query must carry at most ONE COUNT(DISTINCT), regardless of the
+        # 5-column batch cap that previously let 5 pile into one query.
+        v = self._validator(distinct_cap=1)
+        v.gen_report_column_details(self._string_schema(6))
+        assert v._issued, "no queries issued"
+        for q in v._issued:
+            assert q.upper().count("COUNT(DISTINCT") <= 1, q
+
+    def test_report3_caps_distinct_per_query(self):
+        v = self._validator(distinct_cap=1)
+        v.gen_report_column_type_details(self._string_schema(6))
+        assert v._issued
+        for q in v._issued:
+            assert q.upper().count("COUNT(DISTINCT") <= 1, q
+
+    def test_distinct_cap_can_be_raised_for_local_tables(self):
+        v = self._validator(distinct_cap=3)
+        v.gen_report_column_details(self._string_schema(6))
+        per_query = [q.upper().count("COUNT(DISTINCT") for q in v._issued]
+        assert max(per_query) <= 3
+        # 6 distincts at 3/query => 2 queries per side (2 sides = 4 total)
+        assert len(v._issued) == 4
+
+    def test_no_result_column_dropped_across_distinct_batches(self):
+        v = self._validator(distinct_cap=1)
+        result = v.gen_report_column_details(self._string_schema(6))
+        # every column still resolves a uniqueness value (nothing lost when
+        # split across many single-distinct queries)
+        assert result["source_uniqueness"].notna().all()
+        assert result["target_uniqueness"].notna().all()
+
+
 class TestPeriodBreakdownBatching:
     """Regression: a wide table's period breakdown put ALL per-period stat
     aggregates (3 exprs per numeric column) into ONE `GROUP BY period` query.
