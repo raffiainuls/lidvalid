@@ -63,7 +63,11 @@ class RunSettings:
     retry_backoff_seconds: int = 20
     heartbeat_seconds: int = 30
     rowlevel_sample_cap: int = 10_000
-    aggregate_column_batch_size: int = 20
+    # Number of columns to aggregate per query in Report 2 & 3.
+    # Too large (e.g. 20) causes MySQL "Lost connection" (2013) on big tables
+    # due to memory/timeout from doing too many COUNT(DISTINCT)s at once.
+    # 5 columns = ~10-15 expressions, much safer over VPN / small instances.
+    aggregate_column_batch_size: int = 5
 
 
 VALID_MODES = ("aggregate", "rowlevel_missing", "rowlevel_full", "tiered")
