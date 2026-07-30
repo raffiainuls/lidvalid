@@ -11,7 +11,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import FileResponse, PlainTextResponse
 from pydantic import BaseModel
-from sqlalchemy import desc, func, or_
+from sqlalchemy import and_, desc, func, or_
 from sqlalchemy.orm import Session
 
 from validation_core.connectors import SUPPORTED_ENGINES
@@ -566,6 +566,33 @@ def _serialize_status_run_table(rt: models.RunTable) -> dict:
 def api_config_status(config_id: int, user: models.User = Depends(require_login_api), db: Session = Depends(get_db)):
     cfg = db.get(models.ValidationConfig, config_id)
     check_config_access(db, cfg, user, "view")
+
+    # LATEST status must span EVERY run of this config, not just the last
+    # STATUS_HISTORY_RUNS. Partial runs (single-table re-run / resume-only-failing)
+    # only write RunTable rows for the tables they touch, so a table last
+    # validated in an older full run would otherwise wrongly show "never ran"
+    # once 15 newer partial runs pushed that full run out of the window.
+    latest_run_ids = (
+        db.query(
+            models.RunTable.source_table.label("st"),
+            func.max(models.RunTable.run_id).label("max_run_id"),
+        )
+        .join(models.Run, models.Run.id == models.RunTable.run_id)
+        .filter(models.Run.config_id == config_id)
+        .group_by(models.RunTable.source_table)
+        .subquery()
+    )
+    latest_rts = (
+        db.query(models.RunTable)
+        .join(latest_run_ids, and_(
+            models.RunTable.source_table == latest_run_ids.c.st,
+            models.RunTable.run_id == latest_run_ids.c.max_run_id,
+        ))
+        .all()
+    )
+    latest_by_table = {rt.source_table: rt for rt in latest_rts}
+
+    # History stays capped at the last STATUS_HISTORY_RUNS runs (display only).
     runs = (
         db.query(models.Run).filter_by(config_id=config_id)
         .order_by(desc(models.Run.id)).limit(STATUS_HISTORY_RUNS).all()
@@ -576,29 +603,30 @@ def api_config_status(config_id: int, user: models.User = Depends(require_login_
         .order_by(desc(models.RunTable.run_id)).all()
     ) if run_ids else []
 
-    by_table: dict[str, dict] = {}
-    for rt in rts:  # newest run first, so first sighting == latest state
-        entry = by_table.setdefault(rt.source_table, {"latest": rt, "history": []})
-        entry["history"].append(rt)
+    history_by_table: dict[str, list] = {}
+    for rt in rts:  # newest run first
+        history_by_table.setdefault(rt.source_table, []).append(rt)
 
     rows = []
     config_table_names = set()
     for ct in cfg.tables:
         config_table_names.add(ct.source_table)
-        e = by_table.get(ct.source_table)
+        latest = latest_by_table.get(ct.source_table)
+        history = history_by_table.get(ct.source_table, [])
         rows.append({
             "source_table": ct.source_table, "target_table": ct.target_table,
             "enabled": ct.enabled, "removed": False,
-            "latest": _serialize_status_run_table(e["latest"]) if e else None,
-            "history": [_serialize_status_run_table(h) for h in e["history"]] if e else [],
+            "latest": _serialize_status_run_table(latest) if latest else None,
+            "history": [_serialize_status_run_table(h) for h in history],
         })
-    for name, e in by_table.items():
+    for name, latest in latest_by_table.items():
         if name not in config_table_names:
+            history = history_by_table.get(name, [])
             rows.append({
-                "source_table": name, "target_table": e["latest"].target_table,
+                "source_table": name, "target_table": latest.target_table,
                 "enabled": False, "removed": True,
-                "latest": _serialize_status_run_table(e["latest"]),
-                "history": [_serialize_status_run_table(h) for h in e["history"]],
+                "latest": _serialize_status_run_table(latest),
+                "history": [_serialize_status_run_table(h) for h in history],
             })
 
     counts: dict[str, int] = {}

@@ -94,6 +94,43 @@ def test_status_page_merges_latest_state_across_partial_runs(tmp_path):
         assert run1_entry["status"] == "fail"
 
 
+def test_status_latest_survives_beyond_history_window(tmp_path):
+    """Regression: latest status must span ALL runs, not just the last
+    STATUS_HISTORY_RUNS. Table b was validated only in run 1 (a full run);
+    then >15 partial re-runs of table a alone push run 1 out of the history
+    window. b must still report PASS from run 1, not 'never ran'."""
+    from app.routers import api as api_module
+
+    client, db_module, models_module = _make_app(tmp_path)
+    with client:
+        cfg_id, run1_id, _run2_id = _seed(db_module, models_module)
+        _login(client)
+
+        db = db_module.SessionLocal()
+        try:
+            # a stampede of single-table re-runs of "a", enough to evict run 1
+            for _ in range(api_module.STATUS_HISTORY_RUNS + 3):
+                r = models_module.Run(config_id=cfg_id, status="completed", table_filter=["a"])
+                db.add(r); db.commit(); db.refresh(r)
+                db.add(models_module.RunTable(run_id=r.id, source_table="a",
+                                              target_table="raw_a", status="pass"))
+                db.commit()
+        finally:
+            db.close()
+
+        data = client.get(f"/api/configs/{cfg_id}/status").json()
+        rows_by_table = {row["source_table"]: row for row in data["rows"]}
+
+        # b was never re-run, its only RunTable is in run 1 (outside the window)
+        assert rows_by_table["b"]["latest"] is not None, "b wrongly shows 'never ran'"
+        assert rows_by_table["b"]["latest"]["run_id"] == run1_id
+        assert rows_by_table["b"]["latest"]["status"] == "pass"
+        # b has no history rows (run 1 is outside the 15-run window) but latest still resolves
+        assert rows_by_table["b"]["history"] == []
+        # counts must not classify b as never_ran
+        assert data["counts"].get("never_ran", 0) == 0
+
+
 def test_per_table_rerun_creates_single_table_run_and_returns_run_id(tmp_path, monkeypatch):
     client, db_module, models_module = _make_app(tmp_path)
     with client:
