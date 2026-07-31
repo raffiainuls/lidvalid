@@ -16,6 +16,17 @@ from cryptography.fernet import Fernet
 
 _KEY_PATH = Path(__file__).resolve().parent.parent / "data" / "secret.key"
 
+# Shared by main.py's SessionMiddleware and api.py's csrf_token cookie so the
+# two can't drift apart. They used to: SessionMiddleware defaults max_age to
+# 14 days, but the csrf_token cookie was set with no max_age at all, making
+# it a browser-session cookie that's wiped when the browser fully quits.
+# A user who quit and reopened their browser within the 14-day window kept
+# their `session` cookie (still logged in) but lost `csrf_token`, so every
+# mutating request (share config, create run, etc.) silently dropped the
+# X-CSRF-Token header and got rejected with 403 "missing/invalid CSRF token"
+# while GETs kept working fine -- confusing to debug from the symptom alone.
+SESSION_MAX_AGE_SECONDS = 14 * 24 * 60 * 60
+
 
 def _load_or_create_key() -> bytes:
     env_key = os.environ.get("LIDVALID_SECRET_KEY")

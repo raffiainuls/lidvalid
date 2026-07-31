@@ -75,7 +75,11 @@ app = FastAPI(
     description="Validasi data, tuntas sampai baris terakhir.",
     lifespan=lifespan,
 )
-app.add_middleware(SessionMiddleware, secret_key=security._load_or_create_key().decode("ascii"))
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=security._load_or_create_key().decode("ascii"),
+    max_age=security.SESSION_MAX_AGE_SECONDS,
+)
 app.include_router(api.router, prefix="/api")
 
 # Vite's hashed bundle filenames (index-<hash>.js/css) live under dist/assets
