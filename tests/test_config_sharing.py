@@ -317,3 +317,25 @@ def test_admin_can_manage_shares_on_any_config(tmp_path):
 
         admin_csrf = _login(client, "root10")
         assert _share(client, admin_csrf, cfg_id, "friend10", "view").status_code == 201
+
+
+def test_csrf_cookie_persists_as_long_as_session_cookie(tmp_path):
+    """Regression: the csrf_token cookie was set with no max_age, making it a
+    browser-session cookie wiped on browser quit, while the `session` cookie
+    (SessionMiddleware default max_age=14 days) survived. A user who quit and
+    reopened their browser within that window stayed logged in but silently
+    lost CSRF on every mutating request (share config, create run, ...) --
+    GETs kept working, which made the symptom confusing. Both cookies must
+    now carry the same persistent max_age."""
+    client, db_module, models_module, security_module = _make_app(tmp_path)
+    with client:
+        _create_user(db_module, models_module, security_module, "persist1")
+        r = client.post("/api/login", json={"username": "persist1", "password": "pw12345"})
+        assert r.status_code == 200
+
+        session_cookie = next(c for c in client.cookies.jar if c.name == "session")
+        csrf_cookie = next(c for c in client.cookies.jar if c.name == "csrf_token")
+
+        assert csrf_cookie.expires is not None, "csrf_token must not be a browser-session cookie"
+        assert session_cookie.expires is not None
+        assert csrf_cookie.expires == session_cookie.expires

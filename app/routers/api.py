@@ -57,7 +57,14 @@ def _start_session(user: models.User, request: Request, response: Response) -> N
     # the X-CSRF-Token header on mutating requests (double-submit pattern).
     # It's not a secret by itself; require_csrf only trusts it because it's
     # compared against the session's copy, which an attacker can't read/set.
-    response.set_cookie("csrf_token", csrf_token, httponly=False, samesite="lax")
+    # max_age MUST match the session cookie's (security.SESSION_MAX_AGE_SECONDS)
+    # -- without it this is a browser-session cookie that's wiped on browser
+    # quit while the `session` cookie survives, so a still-logged-in user
+    # loses CSRF on every mutating request until they log out and back in.
+    response.set_cookie(
+        "csrf_token", csrf_token, httponly=False, samesite="lax",
+        max_age=security.SESSION_MAX_AGE_SECONDS,
+    )
 
 
 @router.post("/login")
