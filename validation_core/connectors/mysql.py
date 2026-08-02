@@ -3,6 +3,7 @@
 backtick quoting used throughout both legacy tools.
 """
 from __future__ import annotations
+import socket
 from typing import Optional
 
 import pandas as pd
@@ -10,6 +11,36 @@ from sqlalchemy import create_engine, event
 from sqlalchemy.engine import URL
 
 from .base import Connector, ConnectionParams, Dialect
+
+
+def _tune_tcp_keepalive(dbapi_conn) -> None:
+    """Shorten TCP keepalive probing on the raw socket so a stateful
+    firewall/NAT on a VPN path (real case: Kemkes's gateway on the ppp0
+    link) doesn't silently drop the connection while a heavy aggregate
+    (COUNT(DISTINCT) on a wide/large table) is still computing server-side.
+    During that window zero bytes cross the wire in either direction --
+    pymysql already turns on bare SO_KEEPALIVE, but the OS default idle time
+    before the first probe is ~2 hours on Linux, far past how long a NAT
+    table entry survives with no traffic. Real incident: a single-column
+    COUNT(DISTINCT) on ws_stock_opnames -- already the smallest possible
+    query after column/distinct batching -- still hit MySQL error 2013
+    ("Lost connection... during query") minutes in.
+    Best-effort: TCP_KEEPIDLE/INTVL/CNT aren't available on every platform
+    (e.g. macOS lacks the Linux names), so failures here are swallowed --
+    losing the tuning is far better than losing the whole connection."""
+    sock = getattr(dbapi_conn, "_sock", None)
+    if sock is None:
+        return
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        if hasattr(socket, "TCP_KEEPIDLE"):
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 15)
+        if hasattr(socket, "TCP_KEEPINTVL"):
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 10)
+        if hasattr(socket, "TCP_KEEPCNT"):
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 5)
+    except OSError:
+        pass
 
 
 class MySqlDialect(Dialect):
@@ -102,6 +133,7 @@ class MySqlConnector(Connector):
 
         @event.listens_for(self._engine, "connect")
         def _set_session_vars(dbapi_conn, _):
+            _tune_tcp_keepalive(dbapi_conn)
             with dbapi_conn.cursor() as cur:
                 cur.execute("SET SESSION wait_timeout=86400")
                 cur.execute("SET SESSION interactive_timeout=86400")
